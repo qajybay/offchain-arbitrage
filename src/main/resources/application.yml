@@ -1,0 +1,119 @@
+spring:
+  application:
+    name: solana-offchain-arbitrage
+
+  # R2DBC PostgreSQL Configuration
+  r2dbc:
+    url: r2dbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:arbitrage}
+    username: ${DB_USERNAME:postgres}
+    password: ${DB_PASSWORD:postgres}
+    pool:
+      enabled: true
+      initial-size: 10
+      max-size: 50
+      max-idle-time: 30m
+      max-acquire-time: 3s
+      max-create-connection-time: 5s
+      validation-query: SELECT 1
+
+  # Liquibase for database migrations
+  liquibase:
+    enabled: false # Will enable when we add migrations
+
+  # WebFlux configuration
+  webflux:
+    base-path: /api
+
+# Solana Configuration
+solana:
+  rpc:
+    url: ${HELIUS_RPC_URL:https://api.mainnet-beta.solana.com}
+    api-key: ${HELIUS_API_KEY:}
+    timeout: 30
+    max-retries: 3
+  network: ${SOLANA_NETWORK:mainnet}
+
+# Arbitrage Configuration
+arbitrage:
+  scanner:
+    enabled: ${SCANNER_ENABLED:true}
+    interval-ms: ${SCAN_INTERVAL:3000}
+    batch-size: 20
+    virtual-threads-enabled: true
+
+  thresholds:
+    min-triangle-profit: ${MIN_TRIANGLE_PROFIT:0.01}    # 1%
+    min-two-way-profit: ${MIN_TWO_WAY_PROFIT:0.005}    # 0.5%
+    min-tvl: ${MIN_TVL:40000}
+    max-slippage: 0.005                                 # 0.5%
+
+  execution:
+    dry-run: ${DRY_RUN:true}
+    max-concurrent: 5
+    timeout-seconds: 10
+
+# Jupiter API Configuration
+jupiter:
+  api:
+    url: ${JUPITER_API_URL:https://quote-api.jup.ag/v6}
+    timeout: 10s
+
+# ELK Stack Configuration
+elk:
+  enabled: ${ELK_ENABLED:false}
+  logstash:
+    host: ${LOGSTASH_HOST:localhost}
+    port: ${LOGSTASH_PORT:5044}
+    connect-timeout: ${LOGSTASH_CONNECT_TIMEOUT:5000}
+    queue-size: ${LOGSTASH_QUEUE_SIZE:512}
+
+# Management & Monitoring
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus,env
+      base-path: /actuator
+
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+    prometheus:
+      enabled: true
+
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+    tags:
+      application: ${spring.application.name}
+      environment: ${ENVIRONMENT:development}
+
+  health:
+    db:
+      enabled: true
+    diskspace:
+      enabled: true
+
+# Server Configuration
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+
+# Logging Configuration
+logging:
+  level:
+    root: ${LOG_LEVEL:INFO}
+    com.berrx: DEBUG
+    org.springframework.r2dbc: DEBUG
+    io.r2dbc.postgresql: DEBUG
+    software.sava: INFO
+
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+
+# Virtual Threads Configuration
+spring.threads.virtual:
+  enabled: true
