@@ -1,87 +1,161 @@
 package com.berrx.repository;
 
 import com.berrx.model.Pool;
-import com.berrx.model.TradePair;
-import org.springframework.data.r2dbc.repository.Query;
-import org.springframework.data.repository.reactive.ReactiveCrudRepository;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
-import reactor.core.publisher.Flux;
-import reactor.core.publisher.Mono;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.List;
+import java.util.Optional;
 
 /**
- * Repository for Pool entities with reactive R2DBC operations.
+ * Repository для Pool entities с JPA.
+ * Поддерживает фильтрацию по DEX, TVL и поиск торговых пар.
  */
 @Repository
-public interface PoolRepository extends ReactiveCrudRepository<Pool, Long> {
+public interface PoolRepository extends JpaRepository<Pool, Long> {
 
     /**
-     * Find pool by address
+     * Найти пул по адресу
      */
-    Mono<Pool> findByAddress(String address);
+    Optional<Pool> findByAddress(String address);
 
     /**
-     * Find all active pools with TVL above threshold
+     * Найти активные пулы с минимальным TVL
      */
-    @Query("SELECT * FROM pools WHERE is_active = true AND tvl >= :minTvl ORDER BY tvl DESC")
-    Flux<Pool> findActivePoolsWithMinTvl(Long minTvl);
+    @Query("SELECT p FROM Pool p WHERE p.isActive = true AND p.tvlUsd >= :minTvl ORDER BY p.tvlUsd DESC")
+    List<Pool> findActivePoolsWithMinTvl(@Param("minTvl") Double minTvl);
 
     /**
-     * Find pools by DEX name
+     * Найти пулы по DEX и статусу
      */
-    Flux<Pool> findByDexNameAndIsActive(String dexName, Boolean isActive);
+    List<Pool> findByDexNameAndIsActiveOrderByTvlUsdDesc(String dexName, Boolean isActive);
 
     /**
-     * Find pools containing specific token
+     * Найти пулы по конкретным DEX
      */
-    @Query("SELECT * FROM pools WHERE is_active = true AND (token_a_mint = :tokenMint OR token_b_mint = :tokenMint)")
-    Flux<Pool> findActivePoolsWithToken(String tokenMint);
+    @Query("SELECT p FROM Pool p WHERE p.dexName IN :dexNames AND p.isActive = true AND p.tvlUsd >= :minTvl ORDER BY p.tvlUsd DESC")
+    List<Pool> findByDexNamesAndMinTvl(@Param("dexNames") List<String> dexNames, @Param("minTvl") Double minTvl);
 
     /**
-     * Find pools for a specific token pair (both directions)
+     * Найти активные пулы с токеном
      */
-    @Query("""
-        SELECT * FROM pools 
-        WHERE is_active = true 
-        AND ((token_a_mint = :tokenA AND token_b_mint = :tokenB) 
-             OR (token_a_mint = :tokenB AND token_b_mint = :tokenA))
-        ORDER BY tvl DESC
-        """)
-    Flux<Pool> findPoolsForTokenPair(String tokenA, String tokenB);
+    @Query("SELECT p FROM Pool p WHERE p.isActive = true AND (p.tokenAMint = :tokenMint OR p.tokenBMint = :tokenMint) ORDER BY p.tvlUsd DESC")
+    List<Pool> findActivePoolsWithToken(@Param("tokenMint") String tokenMint);
 
     /**
-     * Count active pools
-     */
-    @Query("SELECT COUNT(*) FROM pools WHERE is_active = true")
-    Mono<Long> countActivePools();
-
-    /**
-     * Find pools that need updating (older than specified minutes)
-     */
-    @Query("SELECT * FROM pools WHERE is_active = true AND last_updated < :cutoffTime")
-    Flux<Pool> findPoolsNeedingUpdate(LocalDateTime cutoffTime);
-
-    /**
-     * Update pool TVL and timestamp
-     */
-    @Query("UPDATE pools SET tvl = :tvl, last_updated = :lastUpdated WHERE address = :address")
-    Mono<Integer> updatePoolTvl(String address, Long tvl, LocalDateTime lastUpdated);
-
-    /**
-     * Deactivate pools not seen recently
-     */
-    @Query("UPDATE pools SET is_active = false WHERE last_updated < :cutoffTime")
-    Mono<Integer> deactivateOldPools(LocalDateTime cutoffTime);
-
-    /**
-     * Get top pools by TVL for each DEX
+     * Найти пулы для торговой пары (оба направления)
      */
     @Query("""
-        SELECT DISTINCT ON (dex_name) *
-        FROM pools 
-        WHERE is_active = true AND tvl >= :minTvl
-        ORDER BY dex_name, tvl DESC
+        SELECT p FROM Pool p 
+        WHERE p.isActive = true 
+        AND ((p.tokenAMint = :tokenA AND p.tokenBMint = :tokenB) 
+             OR (p.tokenAMint = :tokenB AND p.tokenBMint = :tokenA))
+        ORDER BY p.tvlUsd DESC
         """)
-    Flux<Pool> findTopPoolsByDex(Long minTvl);
+    List<Pool> findPoolsForTokenPair(@Param("tokenA") String tokenA, @Param("tokenB") String tokenB);
+
+    /**
+     * Найти топ пулы по каждому DEX
+     */
+    @Query(value = """
+        SELECT DISTINCT ON (p.dex_name) p.*
+        FROM pools p 
+        WHERE p.is_active = true AND p.tvl_usd >= :minTvl
+        ORDER BY p.dex_name, p.tvl_usd DESC
+        """, nativeQuery = true)
+    List<Pool> findTopPoolsByDex(@Param("minTvl") Double minTvl);
+
+    /**
+     * Подсчитать активные пулы
+     */
+    @Query("SELECT COUNT(*) FROM Pool p WHERE p.isActive = true")
+    Long countActivePools();
+
+    /**
+     * Подсчитать пулы по DEX
+     */
+    @Query("SELECT COUNT(*) FROM Pool p WHERE p.dexName = :dexName AND p.isActive = true")
+    Long countActivePoolsByDex(@Param("dexName") String dexName);
+
+    /**
+     * Найти устаревшие пулы
+     */
+    @Query("SELECT p FROM Pool p WHERE p.isActive = true AND p.lastUpdated < :cutoffTime")
+    List<Pool> findStaleActivePools(@Param("cutoffTime") LocalDateTime cutoffTime);
+
+    /**
+     * Деактивировать старые пулы
+     */
+    @Modifying
+    @Transactional
+    @Query("UPDATE Pool p SET p.isActive = false WHERE p.lastUpdated < :cutoffTime")
+    int deactivateOldPools(@Param("cutoffTime") LocalDateTime cutoffTime);
+
+    /**
+     * Обновить TVL пула
+     */
+    @Modifying
+    @Query("UPDATE Pool p SET p.tvlUsd = :tvlUsd, p.lastUpdated = :lastUpdated WHERE p.address = :address")
+    int updatePoolTvl(@Param("address") String address, @Param("tvlUsd") Double tvlUsd, @Param("lastUpdated") LocalDateTime lastUpdated);
+
+    /**
+     * Найти дубликаты пулов (по токенам и DEX)
+     */
+    @Query("""
+        SELECT p FROM Pool p 
+        WHERE p.dexName = :dexName 
+        AND ((p.tokenAMint = :tokenA AND p.tokenBMint = :tokenB) 
+             OR (p.tokenAMint = :tokenB AND p.tokenBMint = :tokenA))
+        AND p.address != :excludeAddress
+        """)
+    List<Pool> findDuplicatePools(@Param("dexName") String dexName,
+                                  @Param("tokenA") String tokenA,
+                                  @Param("tokenB") String tokenB,
+                                  @Param("excludeAddress") String excludeAddress);
+
+    /**
+     * Найти пулы по списку адресов
+     */
+    @Query("SELECT p FROM Pool p WHERE p.address IN :addresses")
+    List<Pool> findByAddresses(@Param("addresses") List<String> addresses);
+
+    /**
+     * Найти пулы с метаданными (для проверки качества данных)
+     */
+    @Query("SELECT p FROM Pool p WHERE p.tokenASymbol IS NOT NULL AND p.tokenBSymbol IS NOT NULL AND p.isActive = true")
+    List<Pool> findPoolsWithMetadata();
+
+    /**
+     * Найти пулы без метаданных (для обновления)
+     */
+    @Query("SELECT p FROM Pool p WHERE (p.tokenASymbol IS NULL OR p.tokenBSymbol IS NULL) AND p.isActive = true")
+    List<Pool> findPoolsWithoutMetadata();
+
+    /**
+     * Статистика по DEX
+     */
+    @Query("""
+        SELECT p.dexName, COUNT(*), AVG(p.tvlUsd), SUM(p.tvlUsd)
+        FROM Pool p 
+        WHERE p.isActive = true 
+        GROUP BY p.dexName 
+        ORDER BY COUNT(*) DESC
+        """)
+    List<Object[]> getDexStatistics();
+
+    /**
+     * Найти недавно обновленные пулы
+     */
+    @Query("SELECT p FROM Pool p WHERE p.lastUpdated >= :since ORDER BY p.lastUpdated DESC")
+    List<Pool> findRecentlyUpdated(@Param("since") LocalDateTime since);
+
+    /**
+     * Найти пулы по источнику данных
+     */
+    List<Pool> findBySourceAndIsActiveOrderByTvlUsdDesc(String source, Boolean isActive);
 }

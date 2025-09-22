@@ -1,119 +1,258 @@
 spring:
   application:
-    name: solana-offchain-arbitrage
+    name: solana-arbitrage-bot
 
-  # R2DBC PostgreSQL Configuration
-  r2dbc:
-    url: r2dbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:arbitrage}
-    username: ${DB_USERNAME:postgres}
-    password: ${DB_PASSWORD:postgres}
-    pool:
-      enabled: true
-      initial-size: 10
-      max-size: 50
-      max-idle-time: 30m
-      max-acquire-time: 3s
-      max-create-connection-time: 5s
-      validation-query: SELECT 1
+  # PostgreSQL JPA
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:arbitrage}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+    hikari:
+      maximum-pool-size: 10  # Уменьшено для стабильности
+      connection-timeout: 20000
+      idle-timeout: 300000
 
-  # Liquibase for database migrations
-  liquibase:
-    enabled: false # Will enable when we add migrations
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
 
-  # WebFlux configuration
-  webflux:
-    base-path: /api
+# Модули - включаем по мере разработки
+modules:
+  dex-screener:
+    enabled: ${DEX_SCREENER_ENABLED:true}
+  solana-rpc:
+    enabled: ${SOLANA_RPC_ENABLED:false}  # Пока отключаем
+  arbitrage-detector:
+    enabled: ${ARBITRAGE_DETECTOR_ENABLED:false}
+  trade-executor:
+    enabled: ${TRADE_EXECUTOR_ENABLED:false}
 
-# Solana Configuration
+# DEX Screener - ИСПРАВЛЕННЫЕ настройки
+dex-screener:
+  api:
+    base-url: https://api.dexscreener.com/latest
+    timeout-seconds: 15  # Уменьшено для быстрых ответов
+    rate-limit: 300 # requests per 5 minutes
+  scanner:
+    interval-minutes: ${DEX_SCREENER_INTERVAL:10}  # Увеличено для стабильности
+    min-liquidity-usd: ${MIN_LIQUIDITY_USD:50000}
+
+# Solana (пока не используется)
 solana:
   rpc:
-    url: ${HELIUS_RPC_URL:https://api.mainnet-beta.solana.com}
-    api-key: ${HELIUS_API_KEY:}
-    timeout: 30
-    max-retries: 3
-  network: ${SOLANA_NETWORK:mainnet}
+    primary:
+      url: ${PRIMARY_RPC_URL:https://api.mainnet-beta.solana.com}
+    fallback:
+      enabled: ${HELIUS_FALLBACK_ENABLED:false}
+      url: ${HELIUS_RPC_URL:}
+      api-key: ${HELIUS_API_KEY:}
 
-# Arbitrage Configuration
+# Арбитраж настройки
 arbitrage:
-  scanner:
-    enabled: ${SCANNER_ENABLED:true}
-    interval-ms: ${SCAN_INTERVAL:3000}
-    batch-size: 20
-    virtual-threads-enabled: true
-
   thresholds:
-    min-triangle-profit: ${MIN_TRIANGLE_PROFIT:0.01}    # 1%
-    min-two-way-profit: ${MIN_TWO_WAY_PROFIT:0.005}    # 0.5%
-    min-tvl: ${MIN_TVL:40000}
-    max-slippage: 0.005                                 # 0.5%
+    min-profit-percent: ${MIN_PROFIT_PERCENT:0.5}
+    min-tvl-usd: ${MIN_TVL_USD:40000}
+    max-slippage-percent: 2.0
 
-  execution:
-    dry-run: ${DRY_RUN:true}
-    max-concurrent: 5
-    timeout-seconds: 10
+# Логирование
+logging:
+  level:
+    com.berrx.service.DexScreenerService: DEBUG
+    org.springframework.web.reactive: WARN
+    reactor.netty: WARN
 
-# Jupiter API Configuration
-jupiter:
-  api:
-    url: ${JUPITER_API_URL:https://quote-api.jup.ag/v6}
-    timeout: 10s
-
-# ELK Stack Configuration
-elk:
-  enabled: ${ELK_ENABLED:false}
-  logstash:
-    host: ${LOGSTASH_HOST:localhost}
-    port: ${LOGSTASH_PORT:5044}
-    connect-timeout: ${LOGSTASH_CONNECT_TIMEOUT:5000}
-    queue-size: ${LOGSTASH_QUEUE_SIZE:512}
-
-# Management & Monitoring
+# Отключаем пока ELK и Prometheus
 management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics,prometheus,env
-      base-path: /actuator
-
+        include: health,info
   endpoint:
     health:
-      show-details: always
-      probes:
-        enabled: true
-    prometheus:
-      enabled: true
+      show-details: when-authorized
 
-  metrics:
-    export:
-      prometheus:
-        enabled: true
-    tags:
-      application: ${spring.application.name}
-      environment: ${ENVIRONMENT:development}
+######################################################
+#spring:
+#  application:
+#    name: solana-arbitrage-bot
+#
+#  # PostgreSQL JPA (НЕ R2DBC)
+#  datasource:
+#    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:arbitrage}
+#    username: ${DB_USERNAME}
+#    password: ${DB_PASSWORD}
+#    hikari:
+#      maximum-pool-size: 20
+#      minimum-idle: 5
+#      connection-timeout: 20000
+#
+#  jpa:
+#    hibernate:
+#      ddl-auto: validate
+#    show-sql: false
+#    database-platform: org.hibernate.dialect.PostgreSQLDialect
+#    open-in-view: false
+#
+## Модули - включаем постепенно
+#modules:
+#  dex-screener:
+#    enabled: ${DEX_SCREENER_ENABLED:true}
+#  solana-rpc:
+#    enabled: ${SOLANA_RPC_ENABLED:true}
+#  arbitrage-detector:
+#    enabled: ${ARBITRAGE_DETECTOR_ENABLED:false}
+#  trade-executor:
+#    enabled: ${TRADE_EXECUTOR_ENABLED:false}
+#
+## DEX Screener API
+#dex-screener:
+#  api:
+#    base-url: https://api.dexscreener.com/latest
+#    timeout-seconds: 30
+#    rate-limit-per-minute: 60
+#  scanner:
+#    interval-minutes: ${DEX_SCREENER_INTERVAL:5}
+#    min-liquidity-usd: ${MIN_LIQUIDITY_USD:40000}
+#  target-dex:
+#    - raydium
+#    - orca
+#    - meteora
+#    - jupiter
+#
+## Solana RPC с fallback
+#solana:
+#  rpc:
+#    primary:
+#      url: ${PRIMARY_RPC_URL:https://api.mainnet-beta.solana.com}
+#      timeout-seconds: 30
+#    fallback:
+#      enabled: ${HELIUS_FALLBACK_ENABLED:false}
+#      url: ${HELIUS_RPC_URL:}
+#      api-key: ${HELIUS_API_KEY:}
+#      timeout-seconds: 10
+#
+## Арбитраж настройки
+#arbitrage:
+#  thresholds:
+#    min-profit-percent: ${MIN_PROFIT_PERCENT:0.5}
+#    min-tvl-usd: ${MIN_TVL_USD:40000}
+#    max-slippage-percent: 2.0
+#  detector:
+#    interval-seconds: ${ARBITRAGE_INTERVAL:30}
+#    max-opportunities: 10
+#
+## Management endpoints (без ELK и Prometheus пока)
+#management:
+#  endpoints:
+#    web:
+#      exposure:
+#        include: health,info
+#      base-path: /actuator
+#  endpoint:
+#    health:
+#      show-details: when-authorized
+#  health:
+#    db:
+#      enabled: true
+#
+## Server
+#server:
+#  port: ${SERVER_PORT:8080}
+#  shutdown: graceful
+#
+## Logging (простое, без ELK пока)
+#logging:
+#  level:
+#    root: ${LOG_LEVEL:INFO}
+#    com.berrx: ${APP_LOG_LEVEL:DEBUG}
+#    org.springframework.web: WARN
+#    org.hibernate: WARN
+#  pattern:
+#    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
 
-  health:
-    db:
-      enabled: true
-    diskspace:
-      enabled: true
+########################################################################
 
-# Server Configuration
-server:
-  port: ${SERVER_PORT:8080}
-  shutdown: graceful
 
-# Logging Configuration
-logging:
-  level:
-    root: ${LOG_LEVEL:INFO}
-    com.berrx: DEBUG
-    org.springframework.r2dbc: DEBUG
-    io.r2dbc.postgresql: DEBUG
-    software.sava: INFO
 
-  pattern:
-    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
 
-# Virtual Threads Configuration
-spring.threads.virtual:
-  enabled: true
+
+# R2DBC PostgreSQL Configuration - ИСПРАВЛЕНО
+#spring:
+#  application:
+#    name: solana-offchain-arbitrage
+
+#  r2dbc:
+#    url: r2dbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:arbitrage}
+#    username: ${DB_USERNAME:postgres}
+#    password: ${DB_PASSWORD:postgres}
+#    pool:
+#      enabled: true
+#      initial-size: 5              # Уменьшил начальный размер
+#      max-size: 20                 # Уменьшил максимальный размер
+#      max-idle-time: 10m           # Сократил время простоя
+#      max-acquire-time: 10s        # УВЕЛИЧИЛ timeout до 10 секунд
+#      max-create-connection-time: 10s  # УВЕЛИЧИЛ timeout создания
+#      validation-query: SELECT 1
+#      # Добавляем дополнительные настройки для стабильности
+#      max-life-time: 30m
+#      leak-detection-threshold: 60000
+#
+#  # Включаем SQL логирование для дебага
+#  logging:
+#    level:
+#      io.r2dbc.postgresql: DEBUG
+#      org.springframework.r2dbc: DEBUG
+
+# Logging Configuration для диагностики
+#logging:
+#  level:
+#    root: INFO
+#    com.berrx: DEBUG
+#    io.r2dbc.postgresql: INFO  # Убираем DEBUG чтобы не спамить
+#    org.springframework.r2dbc: INFO
+#    io.r2dbc: INFO
+
+#  pattern:
+#    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+
+# Management endpoints для диагностики
+#management:
+#  endpoints:
+#    web:
+#      exposure:
+#        include: health,info,metrics,prometheus,env
+#      base-path: /actuator
+#  endpoint:
+#    health:
+#      show-details: always
+#      probes:
+#        enabled: true
+#
+#solana:
+#  rpc:
+#    url: ${HELIUS_RPC_URL:https://api.mainnet-beta.solana.com}
+#    api-key: ${HELIUS_API_KEY:}
+#    timeout: 30
+#    max-retries: 3
+#  network: ${SOLANA_NETWORK:mainnet}
+#
+#arbitrage:
+#  scanner:
+#    enabled: ${SCANNER_ENABLED:true}
+#    interval-ms: ${SCAN_INTERVAL:300000}  # Увеличил интервал до 5 минут для тестов
+#    batch-size: 10                       # Уменьшил batch size
+#    virtual-threads-enabled: true
+
+#  thresholds:
+#    min-triangle-profit: ${MIN_TRIANGLE_PROFIT:0.01}
+#    min-two-way-profit: ${MIN_TWO_WAY_PROFIT:0.005}
+#    min-tvl: ${MIN_TVL:40000}
+#    max-slippage: 0.005
+#
+#  execution:
+#    dry-run: ${DRY_RUN:true}
+#    max-concurrent: 3              # Уменьшил количество одновременных операций
+#    timeout-seconds: 10
+
+# Остальные настройки без изменений...

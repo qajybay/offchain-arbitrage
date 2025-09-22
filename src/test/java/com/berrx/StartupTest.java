@@ -1,7 +1,5 @@
 package com.berrx;
 
-import com.berrx.config.SolanaConfig;
-
 import lombok.extern.slf4j.Slf4j;
 import org.p2p.solanaj.rpc.RpcClient;
 import org.springframework.beans.factory.annotation.Autowired;

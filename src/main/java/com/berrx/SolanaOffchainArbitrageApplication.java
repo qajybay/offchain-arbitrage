@@ -1,6 +1,5 @@
 package com.berrx;
 
-import com.berrx.config.ElkConfigProperties;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.SpringApplication;
@@ -22,9 +21,6 @@ import reactor.core.publisher.Hooks;
 @EnableScheduling
 @EnableConfigurationProperties
 public class SolanaOffchainArbitrageApplication {
-
-	@Autowired(required = false)
-	private ElkConfigProperties elkConfig;
 
 	public static void main(String[] args) {
 		// Enable reactor debugging in development
@@ -49,15 +45,6 @@ public class SolanaOffchainArbitrageApplication {
 		log.info("Java Version: {}", System.getProperty("java.version"));
 		log.info("Active Profile: {}", System.getenv("ENVIRONMENT") != null ?
 				System.getenv("ENVIRONMENT") : "default");
-
-		// ELK Status
-		if (elkConfig != null && elkConfig.isEnabled()) {
-			log.info("ELK Stack: Enabled ({}:{})",
-					elkConfig.getLogstash().getHost(),
-					elkConfig.getLogstash().getPort());
-		} else {
-			log.info("ELK Stack: Disabled (logs to console/file only)");
-		}
 
 		log.info("=================================================");
 	}
