@@ -5,6 +5,7 @@ import com.berrx.repository.PoolRepository;
 import com.berrx.service.dto.DexPool;
 import com.berrx.service.dto.DexScreenerResponse;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -20,8 +21,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 /**
- * ФИНАЛЬНАЯ ИСПРАВЛЕННАЯ версия DEX Screener сервиса.
- * Исправлены все ошибки JSON десериализации и IndexOutOfBoundsException.
+ * DexScreenerService оптимизированный для работы с rate limiting Solana RPC.
+ * Уменьшено количество RPC вызовов и добавлена интеллектуальная приоритизация пулов.
  */
 @Service
 @ConditionalOnProperty(name = "modules.dex-screener.enabled", havingValue = "true")
@@ -30,6 +31,7 @@ public class DexScreenerService {
 
     private final WebClient webClient;
     private final PoolRepository poolRepository;
+    private final SolanaPriceService solanaPriceService;
 
     // Известные токены для поиска основных пар
     private static final List<String> MAIN_TOKENS = List.of(
@@ -46,10 +48,8 @@ public class DexScreenerService {
     // Счетчики для статистики
     private final AtomicInteger totalPoolsLoaded = new AtomicInteger(0);
     private final AtomicInteger lastScanCount = new AtomicInteger(0);
+    private final AtomicInteger poolsWithPrices = new AtomicInteger(0);
     private volatile LocalDateTime lastScanTime;
-
-    @Value("${dex-screener.api.base-url:https://api.dexscreener.com/latest}")
-    private String baseUrl;
 
     @Value("${dex-screener.scanner.min-liquidity-usd:40000}")
     private double minLiquidityUsd;
@@ -57,8 +57,20 @@ public class DexScreenerService {
     @Value("${dex-screener.api.timeout-seconds:15}")
     private int timeoutSeconds;
 
-    public DexScreenerService(PoolRepository poolRepository) {
+    @Value("${dex-screener.price-updates.enabled:true}")
+    private boolean priceUpdatesEnabled;
+
+    // НОВОЕ: Настройки для RPC rate limiting
+    @Value("${dex-screener.price-updates.max-pools:3}")
+    private int maxPoolsForPriceUpdate;
+
+    @Value("${dex-screener.price-updates.min-tvl-multiplier:5}")
+    private double minTvlMultiplier;
+
+    public DexScreenerService(PoolRepository poolRepository,
+                              @Autowired(required = false) SolanaPriceService solanaPriceService) {
         this.poolRepository = poolRepository;
+        this.solanaPriceService = solanaPriceService;
 
         this.webClient = WebClient.builder()
                 .baseUrl("https://api.dexscreener.com/latest")
@@ -68,26 +80,51 @@ public class DexScreenerService {
                 })
                 .build();
 
-        log.info("DEX Screener WebClient initialized");
+        log.info("DEX Screener Service initialized with RPC integration: {}",
+                solanaPriceService != null ? "ENABLED" : "DISABLED");
+        log.info("RPC settings: max {} pools, min TVL multiplier: {}x",
+                maxPoolsForPriceUpdate, minTvlMultiplier);
     }
 
     /**
-     * Основной метод - загружаем пулы асинхронно
+     * ГЛАВНЫЙ МЕТОД: Загрузка метаданных + обновление цен (ОПТИМИЗИРОВАННЫЙ)
      */
-    @Scheduled(fixedDelayString = "${dex-screener.scanner.interval-minutes:10}000")
+    @Scheduled(fixedDelayString = "${dex-screener.scanner.interval-minutes:15}000") // Увеличен интервал
     public void loadAndSavePools() {
-        log.info("Starting DEX Screener scan...");
+        log.info("Starting DEX Screener scan with conservative RPC updates...");
         lastScanTime = LocalDateTime.now();
 
-        // Асинхронная загрузка
         CompletableFuture.supplyAsync(this::fetchAllValidPools)
-                .thenAccept(pools -> {
+                .thenCompose(pools -> {
+                    // Сохраняем метаданные
                     int savedCount = savePoolsToDatabase(pools);
                     lastScanCount.set(savedCount);
                     totalPoolsLoaded.addAndGet(savedCount);
 
-                    log.info("DEX Screener scan completed. Saved {} pools", savedCount);
+                    log.info("Saved {} pools metadata from DEX Screener", savedCount);
+
+                    // ОБНОВЛЕНО: Консервативное обновление цен
+                    if (priceUpdatesEnabled && solanaPriceService != null && !pools.isEmpty()) {
+                        return updatePoolPricesConservative(pools);
+                    } else {
+                        return CompletableFuture.completedFuture(pools);
+                    }
+                })
+                .thenAccept(poolsWithUpdatedPrices -> {
+                    if (poolsWithUpdatedPrices != null) {
+                        long withPrices = poolsWithUpdatedPrices.stream()
+                                .mapToLong(pool -> pool.hasCurrentPrices() ? 1 : 0)
+                                .sum();
+
+                        poolsWithPrices.set((int) withPrices);
+                        log.info("Updated prices for {}/{} pools via Solana RPC",
+                                withPrices, poolsWithUpdatedPrices.size());
+                    }
+
+                    // Деактивируем старые пулы
                     deactivateOldPools();
+
+                    log.info("DEX Screener scan completed successfully");
                 })
                 .exceptionally(error -> {
                     log.error("DEX Screener scan failed", error);
@@ -96,23 +133,112 @@ public class DexScreenerService {
     }
 
     /**
-     * ИСПРАВЛЕННЫЙ подход - используем только стабильные методы
+     * НОВОЕ: Консервативное обновление цен с минимальным количеством RPC вызовов
      */
+    private CompletableFuture<List<Pool>> updatePoolPricesConservative(List<Pool> pools) {
+        if (solanaPriceService == null) {
+            return CompletableFuture.completedFuture(pools);
+        }
+
+        return CompletableFuture.supplyAsync(() -> {
+            log.debug("Starting conservative price updates for {} pools", pools.size());
+
+            // ОПТИМИЗИРОВАНО: Выбираем ТОЛЬКО самые крупные и важные пулы
+            List<Pool> prioritizedPools = pools.stream()
+                    .filter(pool -> pool.getTvlUsd() != null &&
+                            pool.getTvlUsd() >= minLiquidityUsd * minTvlMultiplier) // Только очень крупные
+                    .filter(pool -> isHighPriorityPool(pool)) // Только приоритетные
+                    .sorted((p1, p2) -> {
+                        // Сортируем по приоритету: TVL + тип пары
+                        double priority1 = calculatePoolPriority(p1);
+                        double priority2 = calculatePoolPriority(p2);
+                        return Double.compare(priority2, priority1);
+                    })
+                    .limit(maxPoolsForPriceUpdate) // ЖЁСТКИЙ лимит
+                    .collect(Collectors.toList());
+
+            log.info("Selected {} high-priority pools for price updates (from {} total)",
+                    prioritizedPools.size(), pools.size());
+
+            // Логируем выбранные пулы
+            prioritizedPools.forEach(pool ->
+                    log.debug("Updating prices for priority pool: {} (TVL: {})",
+                            pool.getDisplayName(), pool.getFormattedTvl()));
+
+            List<Pool> updatedPools = solanaPriceService.updatePoolPrices(prioritizedPools);
+
+            // Возвращаем ВСЕ пулы (обновленные + остальные)
+            return pools;
+        });
+    }
+
+    /**
+     * НОВОЕ: Определение высокоприоритетных пулов
+     */
+    private boolean isHighPriorityPool(Pool pool) {
+        // Только SOL, USDC, USDT пары
+        if (!pool.containsSol() && !pool.containsStablecoin()) {
+            return false;
+        }
+
+        // Только основные DEX
+        if (pool.getDexName() == null) return false;
+        String dex = pool.getDexName().toLowerCase();
+        if (!Set.of("raydium", "orca").contains(dex)) {
+            return false;
+        }
+
+        // Только пулы с метаданными
+        return pool.hasValidMetadata();
+    }
+
+    /**
+     * НОВОЕ: Расчёт приоритета пула
+     */
+    private double calculatePoolPriority(Pool pool) {
+        double priority = 0;
+
+        // TVL вес (основной фактор)
+        if (pool.getTvlUsd() != null) {
+            priority += Math.log10(pool.getTvlUsd()) * 1000;
+        }
+
+        // Тип пары бонус
+        if (pool.isStablePair()) {
+            priority += 10000; // USDC/USDT - высший приоритет
+        } else if (pool.containsSol()) {
+            priority += 5000;  // SOL пары - высокий приоритет
+        } else if (pool.containsStablecoin()) {
+            priority += 2000;  // Другие стейблкоин пары
+        }
+
+        // DEX бонус
+        if (pool.getDexName() != null) {
+            switch (pool.getDexName().toLowerCase()) {
+                case "raydium" -> priority += 1000;
+                case "orca" -> priority += 800;
+                case "meteora" -> priority += 600;
+                case "jupiter" -> priority += 400;
+            }
+        }
+
+        return priority;
+    }
+
+    // Остальные методы без изменений (fetchAllValidPools, validation, conversion, etc.)
+
     private List<Pool> fetchAllValidPools() {
         List<Pool> allPools = new ArrayList<>();
 
         try {
-            // Метод 1: Поиск топ пулов Solana (стабильно работает)
             List<Pool> topPools = fetchTopSolanaPools();
             allPools.addAll(topPools);
             log.debug("Found {} pools via top search", topPools.size());
 
-            // Метод 2: ИСПРАВЛЕННЫЙ token-pairs endpoint
             List<Pool> tokenPools = fetchPoolsByTokenPairsFixed();
             allPools.addAll(tokenPools);
             log.debug("Found {} pools via token pairs", tokenPools.size());
 
-            // Метод 3: Поисковые запросы (стабильно работают)
             List<Pool> searchPools = fetchPoolsBySearchQueries();
             allPools.addAll(searchPools);
             log.debug("Found {} pools via search queries", searchPools.size());
@@ -121,7 +247,6 @@ public class DexScreenerService {
             log.error("Error fetching pools", e);
         }
 
-        // Дедупликация и фильтрация
         return allPools.stream()
                 .filter(Objects::nonNull)
                 .collect(Collectors.toMap(
@@ -136,22 +261,18 @@ public class DexScreenerService {
                 .collect(Collectors.toList());
     }
 
-    /**
-     * ИСПРАВЛЕНО: /token-pairs/v1/ возвращает массив напрямую, не объект с полем pairs
-     */
     private List<Pool> fetchPoolsByTokenPairsFixed() {
         List<Pool> pools = new ArrayList<>();
 
         for (String tokenAddress : MAIN_TOKENS) {
             try {
-                // API возвращает массив DexPool[], НЕ DexScreenerResponse
                 String fullUrl = "https://api.dexscreener.com/token-pairs/v1/solana/" + tokenAddress;
 
                 List<DexPool> response = WebClient.create()
                         .get()
                         .uri(fullUrl)
                         .retrieve()
-                        .bodyToFlux(DexPool.class)  // ИСПРАВЛЕНО: bodyToFlux для массива
+                        .bodyToFlux(DexPool.class)
                         .collectList()
                         .timeout(Duration.ofSeconds(timeoutSeconds))
                         .doOnError(error -> log.debug("Token pairs API error for {}: {}", tokenAddress, error.getMessage()))
@@ -169,7 +290,7 @@ public class DexScreenerService {
                     log.debug("Found {} pools for token {}", tokenPools.size(), tokenAddress);
                 }
 
-                Thread.sleep(500); // Rate limiting
+                Thread.sleep(500);
 
             } catch (Exception e) {
                 log.debug("Failed to fetch token pairs for {}: {}", tokenAddress, e.getMessage());
@@ -179,16 +300,13 @@ public class DexScreenerService {
         return pools;
     }
 
-    /**
-     * Поисковые запросы (работают стабильно)
-     */
     private List<Pool> fetchPoolsBySearchQueries() {
         List<Pool> pools = new ArrayList<>();
 
         String[] searchQueries = {
-                "solana trending",  // Популярные пулы
-                "SOL", "USDC",     // Основные токены
-                "raydium", "orca"  // Основные DEX
+                "solana trending",
+                "SOL", "USDC",
+                "raydium", "orca"
         };
 
         for (String query : searchQueries) {
@@ -219,7 +337,7 @@ public class DexScreenerService {
                     log.debug("Search '{}' found {} pools", query, queryPools.size());
                 }
 
-                Thread.sleep(600); // Rate limiting
+                Thread.sleep(600);
 
             } catch (Exception e) {
                 log.debug("Search failed for '{}': {}", query, e.getMessage());
@@ -229,9 +347,6 @@ public class DexScreenerService {
         return pools;
     }
 
-    /**
-     * Топ пулы Solana (работает стабильно)
-     */
     private List<Pool> fetchTopSolanaPools() {
         try {
             DexScreenerResponse response = webClient
@@ -261,13 +376,10 @@ public class DexScreenerService {
         return List.of();
     }
 
-    /**
-     * Валидация пулов
-     */
+    // Остальные методы остаются без изменений
     private boolean isValidDexPool(DexPool dexPool) {
         if (dexPool == null) return false;
 
-        // Базовая валидация
         if (dexPool.getPairAddress() == null ||
                 dexPool.getBaseToken() == null ||
                 dexPool.getQuoteToken() == null ||
@@ -276,22 +388,17 @@ public class DexScreenerService {
             return false;
         }
 
-        // Проверяем что это Solana
         if (!"solana".equalsIgnoreCase(dexPool.getChainId())) {
             return false;
         }
 
-        // Проверяем ликвидность
         if (dexPool.getLiquidity() != null && dexPool.getLiquidity().getUsd() != null) {
             return dexPool.getLiquidity().getUsd() >= minLiquidityUsd;
         }
 
-        return false; // Нет данных о ликвидности
+        return false;
     }
 
-    /**
-     * ИСПРАВЛЕННАЯ конвертация с полной защитой от ошибок
-     */
     private Pool convertDexPoolToPoolSafe(DexPool dexPool) {
         try {
             String dexName = dexPool.getDexId() != null ?
@@ -324,9 +431,6 @@ public class DexScreenerService {
         }
     }
 
-    /**
-     * ИСПРАВЛЕНО: Безопасная очистка символа - НЕ БРОСАЕТ IndexOutOfBoundsException
-     */
     private String safeCleanSymbol(String symbol) {
         if (symbol == null || symbol.trim().isEmpty()) {
             return null;
@@ -338,7 +442,6 @@ public class DexScreenerService {
                 return null;
             }
 
-            // КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: проверяем длину ДО substring
             if (cleaned.length() == 0) {
                 return null;
             }
@@ -352,9 +455,6 @@ public class DexScreenerService {
         }
     }
 
-    /**
-     * ИСПРАВЛЕНО: Безопасная очистка названия - НЕ БРОСАЕТ IndexOutOfBoundsException
-     */
     private String safeCleanName(String name) {
         if (name == null || name.trim().isEmpty()) {
             return null;
@@ -363,7 +463,6 @@ public class DexScreenerService {
         try {
             String cleaned = name.trim();
 
-            // КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: проверяем длину ДО substring
             if (cleaned.length() == 0) {
                 return null;
             }
@@ -377,9 +476,6 @@ public class DexScreenerService {
         }
     }
 
-    /**
-     * Сохранение пулов в БД
-     */
     private int savePoolsToDatabase(List<Pool> pools) {
         int savedCount = 0;
 
@@ -405,9 +501,6 @@ public class DexScreenerService {
         return savedCount;
     }
 
-    /**
-     * Деактивация старых пулов
-     */
     private void deactivateOldPools() {
         try {
             LocalDateTime cutoff = LocalDateTime.now().minusHours(24);
@@ -421,7 +514,7 @@ public class DexScreenerService {
         }
     }
 
-    // === ПУБЛИЧНЫЕ МЕТОДЫ ===
+    // Публичные методы
 
     public void triggerManualScan() {
         log.info("Manual DEX Screener scan triggered");
@@ -432,6 +525,7 @@ public class DexScreenerService {
         return new ScanStats(
                 totalPoolsLoaded.get(),
                 lastScanCount.get(),
+                poolsWithPrices.get(),
                 lastScanTime,
                 poolRepository.countActivePools(),
                 getDexPoolCounts()
@@ -449,6 +543,7 @@ public class DexScreenerService {
     public record ScanStats(
             int totalPoolsLoaded,
             int lastScanCount,
+            int poolsWithPrices,
             LocalDateTime lastScanTime,
             Long activePoolsInDb,
             Map<String, Long> dexPoolCounts

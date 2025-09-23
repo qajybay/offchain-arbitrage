@@ -1,100 +1,207 @@
+# ===================================================================
+# SOLANA ARBITRAGE BOT - RATE LIMITING ОПТИМИЗИРОВАННАЯ КОНФИГУРАЦИЯ
+# ===================================================================
+
 spring:
   application:
     name: solana-arbitrage-bot
 
-  # PostgreSQL JPA
   datasource:
     url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:arbitrage}
-    username: ${DB_USERNAME}
-    password: ${DB_PASSWORD}
+    username: ${DB_USERNAME:postgres}
+    password: ${DB_PASSWORD:password}
     hikari:
-      maximum-pool-size: 10  # Уменьшено для стабильности
-      connection-timeout: 20000
+      maximum-pool-size: 8
+      connection-timeout: 15000
       idle-timeout: 300000
+      max-lifetime: 900000
 
   jpa:
     hibernate:
       ddl-auto: validate
     show-sql: false
 
-# Модули - включаем по мере разработки
+# ===================================================================
+# МОДУЛИ
+# ===================================================================
 modules:
   dex-screener:
     enabled: ${DEX_SCREENER_ENABLED:true}
   solana-rpc:
-    enabled: ${SOLANA_RPC_ENABLED:false}  # Пока отключаем
+    enabled: ${SOLANA_RPC_ENABLED:true}
   arbitrage-detector:
     enabled: ${ARBITRAGE_DETECTOR_ENABLED:false}
   trade-executor:
     enabled: ${TRADE_EXECUTOR_ENABLED:false}
 
-# DEX Screener - ИСПРАВЛЕННЫЕ настройки
+# ===================================================================
+# DEX SCREENER - ОПТИМИЗИРОВАННЫЕ НАСТРОЙКИ
+# ===================================================================
 dex-screener:
   api:
     base-url: https://api.dexscreener.com/latest
-    timeout-seconds: 15  # Уменьшено для быстрых ответов
-    rate-limit: 300 # requests per 5 minutes
+    timeout-seconds: 15
   scanner:
-    interval-minutes: ${DEX_SCREENER_INTERVAL:10}  # Увеличено для стабильности
-    min-liquidity-usd: ${MIN_LIQUIDITY_USD:50000}
+    # УВЕЛИЧЕН интервал из-за RPC лимитов
+    interval-minutes: ${DEX_SCREENER_INTERVAL:5}
+    min-liquidity-usd: ${MIN_LIQUIDITY_USD:100000}  # Только очень крупные пулы
 
-# Solana (пока не используется)
+  # НОВЫЕ настройки для RPC rate limiting
+  price-updates:
+    enabled: ${DEX_SCREENER_PRICE_UPDATES:true}
+    max-pools: ${RPC_MAX_POOLS:3}                   # ТОЛЬКО 3 пула за раз
+    min-tvl-multiplier: ${RPC_TVL_MULTIPLIER:5}     # Только пулы > 500k USD
+
+# ===================================================================
+# SOLANA RPC - КОНСЕРВАТИВНЫЕ НАСТРОЙКИ
+# ===================================================================
 solana:
   rpc:
+    # Основной RPC (публичный с лимитами)
     primary:
       url: ${PRIMARY_RPC_URL:https://api.mainnet-beta.solana.com}
+
+    # Fallback RPC (НАСТОЯТЕЛЬНО РЕКОМЕНДУЕТСЯ для продакшна)
     fallback:
-      enabled: ${HELIUS_FALLBACK_ENABLED:false}
-      url: ${HELIUS_RPC_URL:}
+      enabled: ${HELIUS_FALLBACK_ENABLED:true}
+      url: ${HELIUS_RPC_URL:https://mainnet.helius-rpc.com}
       api-key: ${HELIUS_API_KEY:}
 
-# Арбитраж настройки
+    # Консервативные настройки подключения
+    timeout-ms: 15000         # Увеличен таймаут
+    max-retries: 2           # Уменьшено количество попыток
+    retry-delay-ms: 3000     # Увеличена задержка между попытками
+
+# ===================================================================
+# АРБИТРАЖ (для будущего)
+# ===================================================================
 arbitrage:
   thresholds:
-    min-profit-percent: ${MIN_PROFIT_PERCENT:0.5}
-    min-tvl-usd: ${MIN_TVL_USD:40000}
-    max-slippage-percent: 2.0
+    min-profit-percent: 1.0   # Увеличен минимальный профит
+    min-tvl-usd: 200000      # Только крупные пулы
+    max-slippage-percent: 1.5
 
-# Логирование
+# ===================================================================
+# ЛОГИРОВАНИЕ
+# ===================================================================
 logging:
   level:
-    com.berrx.service.DexScreenerService: DEBUG
-    org.springframework.web.reactive: WARN
-    reactor.netty: WARN
+    com.berrx.service.DexScreenerService: INFO
+    com.berrx.service.SolanaPriceService: INFO
+    com.berrx.config.SolanaConfig: INFO
+    org.p2p.solanaj: WARN
+    root: INFO
 
-# Отключаем пока ELK и Prometheus
+# ===================================================================
+# МОНИТОРИНГ
+# ===================================================================
 management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,metrics
   endpoint:
     health:
       show-details: when-authorized
 
-######################################################
+# ===================================================================
+# ПРОФИЛИ
+# ===================================================================
+---
+# DEVELOPMENT - еще более консервативные настройки
+spring:
+  config:
+    activate:
+      on-profile: development
+
+logging:
+  level:
+    com.berrx: DEBUG
+
+dex-screener:
+  scanner:
+    interval-minutes: 30      # Еще реже в dev
+  price-updates:
+    max-pools: 2             # Только 2 пула в dev
+    min-tvl-multiplier: 10   # Только мегакрупные пулы
+
+solana:
+  rpc:
+    timeout-ms: 10000
+    max-retries: 1           # Минимум попыток в dev
+
+---
+# PRODUCTION - с обязательным fallback
+spring:
+  config:
+    activate:
+      on-profile: production
+
+dex-screener:
+  scanner:
+    interval-minutes: 30     # Редкие сканы в проде
+  price-updates:
+    max-pools: 5            # Максимум 5 пулов в проде
+    enabled: true
+
+solana:
+  rpc:
+    fallback:
+      enabled: true         # ОБЯЗАТЕЛЬНО включаем fallback
+    timeout-ms: 20000
+    max-retries: 3
+
+logging:
+  level:
+    root: WARN
+    com.berrx: INFO
+
+---
+# PREMIUM - с платным RPC
+spring:
+  config:
+    activate:
+      on-profile: premium
+
+dex-screener:
+  scanner:
+    interval-minutes: 10     # Можно чаще с premium RPC
+  price-updates:
+    max-pools: 15           # Больше пулов с premium
+    min-tvl-multiplier: 2   # Меньшие пулы допустимы
+
+solana:
+  rpc:
+    primary:
+      url: ${HELIUS_RPC_URL:https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}}
+    fallback:
+      enabled: true
+      url: https://api.mainnet-beta.solana.com  # Публичный как fallback
+    timeout-ms: 5000        # Быстрее с premium
+    max-retries: 2
+
+
+
 #spring:
 #  application:
 #    name: solana-arbitrage-bot
 #
-#  # PostgreSQL JPA (НЕ R2DBC)
+#  # PostgreSQL JPA
 #  datasource:
 #    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:arbitrage}
 #    username: ${DB_USERNAME}
 #    password: ${DB_PASSWORD}
 #    hikari:
-#      maximum-pool-size: 20
-#      minimum-idle: 5
+#      maximum-pool-size: 10  # Уменьшено для стабильности
 #      connection-timeout: 20000
+#      idle-timeout: 300000
 #
 #  jpa:
 #    hibernate:
 #      ddl-auto: validate
 #    show-sql: false
-#    database-platform: org.hibernate.dialect.PostgreSQLDialect
-#    open-in-view: false
 #
-## Модули - включаем постепенно
+## Модули - включаем по мере разработки
 #modules:
 #  dex-screener:
 #    enabled: ${DEX_SCREENER_ENABLED:true}
@@ -105,32 +212,25 @@ management:
 #  trade-executor:
 #    enabled: ${TRADE_EXECUTOR_ENABLED:false}
 #
-## DEX Screener API
+## DEX Screener - ИСПРАВЛЕННЫЕ настройки
 #dex-screener:
 #  api:
 #    base-url: https://api.dexscreener.com/latest
-#    timeout-seconds: 30
-#    rate-limit-per-minute: 60
+#    timeout-seconds: 15  # Уменьшено для быстрых ответов
+#    rate-limit: 300 # requests per 5 minutes
 #  scanner:
-#    interval-minutes: ${DEX_SCREENER_INTERVAL:5}
-#    min-liquidity-usd: ${MIN_LIQUIDITY_USD:40000}
-#  target-dex:
-#    - raydium
-#    - orca
-#    - meteora
-#    - jupiter
+#    interval-minutes: ${DEX_SCREENER_INTERVAL:10}  # Увеличено для стабильности
+#    min-liquidity-usd: ${MIN_LIQUIDITY_USD:50000}
 #
-## Solana RPC с fallback
+## Solana (пока не используется)
 #solana:
 #  rpc:
 #    primary:
 #      url: ${PRIMARY_RPC_URL:https://api.mainnet-beta.solana.com}
-#      timeout-seconds: 30
 #    fallback:
-#      enabled: ${HELIUS_FALLBACK_ENABLED:false}
+#      enabled: ${HELIUS_FALLBACK_ENABLED:true}
 #      url: ${HELIUS_RPC_URL:}
 #      api-key: ${HELIUS_API_KEY:}
-#      timeout-seconds: 10
 #
 ## Арбитраж настройки
 #arbitrage:
@@ -138,121 +238,205 @@ management:
 #    min-profit-percent: ${MIN_PROFIT_PERCENT:0.5}
 #    min-tvl-usd: ${MIN_TVL_USD:40000}
 #    max-slippage-percent: 2.0
-#  detector:
-#    interval-seconds: ${ARBITRAGE_INTERVAL:30}
-#    max-opportunities: 10
 #
-## Management endpoints (без ELK и Prometheus пока)
+## Логирование
+#logging:
+#  level:
+#    com.berrx.service.DexScreenerService: DEBUG
+#    org.springframework.web.reactive: WARN
+#    reactor.netty: WARN
+#
+## Отключаем пока ELK и Prometheus
 #management:
 #  endpoints:
 #    web:
 #      exposure:
 #        include: health,info
-#      base-path: /actuator
 #  endpoint:
 #    health:
 #      show-details: when-authorized
-#  health:
-#    db:
-#      enabled: true
 #
-## Server
-#server:
-#  port: ${SERVER_PORT:8080}
-#  shutdown: graceful
+#######################################################
+##spring:
+##  application:
+##    name: solana-arbitrage-bot
+##
+##  # PostgreSQL JPA (НЕ R2DBC)
+##  datasource:
+##    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:arbitrage}
+##    username: ${DB_USERNAME}
+##    password: ${DB_PASSWORD}
+##    hikari:
+##      maximum-pool-size: 20
+##      minimum-idle: 5
+##      connection-timeout: 20000
+##
+##  jpa:
+##    hibernate:
+##      ddl-auto: validate
+##    show-sql: false
+##    database-platform: org.hibernate.dialect.PostgreSQLDialect
+##    open-in-view: false
+##
+### Модули - включаем постепенно
+##modules:
+##  dex-screener:
+##    enabled: ${DEX_SCREENER_ENABLED:true}
+##  solana-rpc:
+##    enabled: ${SOLANA_RPC_ENABLED:true}
+##  arbitrage-detector:
+##    enabled: ${ARBITRAGE_DETECTOR_ENABLED:false}
+##  trade-executor:
+##    enabled: ${TRADE_EXECUTOR_ENABLED:false}
+##
+### DEX Screener API
+##dex-screener:
+##  api:
+##    base-url: https://api.dexscreener.com/latest
+##    timeout-seconds: 30
+##    rate-limit-per-minute: 60
+##  scanner:
+##    interval-minutes: ${DEX_SCREENER_INTERVAL:5}
+##    min-liquidity-usd: ${MIN_LIQUIDITY_USD:40000}
+##  target-dex:
+##    - raydium
+##    - orca
+##    - meteora
+##    - jupiter
+##
+### Solana RPC с fallback
+##solana:
+##  rpc:
+##    primary:
+##      url: ${PRIMARY_RPC_URL:https://api.mainnet-beta.solana.com}
+##      timeout-seconds: 30
+##    fallback:
+##      enabled: ${HELIUS_FALLBACK_ENABLED:false}
+##      url: ${HELIUS_RPC_URL:}
+##      api-key: ${HELIUS_API_KEY:}
+##      timeout-seconds: 10
+##
+### Арбитраж настройки
+##arbitrage:
+##  thresholds:
+##    min-profit-percent: ${MIN_PROFIT_PERCENT:0.5}
+##    min-tvl-usd: ${MIN_TVL_USD:40000}
+##    max-slippage-percent: 2.0
+##  detector:
+##    interval-seconds: ${ARBITRAGE_INTERVAL:30}
+##    max-opportunities: 10
+##
+### Management endpoints (без ELK и Prometheus пока)
+##management:
+##  endpoints:
+##    web:
+##      exposure:
+##        include: health,info
+##      base-path: /actuator
+##  endpoint:
+##    health:
+##      show-details: when-authorized
+##  health:
+##    db:
+##      enabled: true
+##
+### Server
+##server:
+##  port: ${SERVER_PORT:8080}
+##  shutdown: graceful
+##
+### Logging (простое, без ELK пока)
+##logging:
+##  level:
+##    root: ${LOG_LEVEL:INFO}
+##    com.berrx: ${APP_LOG_LEVEL:DEBUG}
+##    org.springframework.web: WARN
+##    org.hibernate: WARN
+##  pattern:
+##    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
 #
-## Logging (простое, без ELK пока)
-#logging:
-#  level:
-#    root: ${LOG_LEVEL:INFO}
-#    com.berrx: ${APP_LOG_LEVEL:DEBUG}
-#    org.springframework.web: WARN
-#    org.hibernate: WARN
-#  pattern:
-#    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
-
-########################################################################
-
-
-
-
-
-# R2DBC PostgreSQL Configuration - ИСПРАВЛЕНО
-#spring:
-#  application:
-#    name: solana-offchain-arbitrage
-
-#  r2dbc:
-#    url: r2dbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:arbitrage}
-#    username: ${DB_USERNAME:postgres}
-#    password: ${DB_PASSWORD:postgres}
-#    pool:
-#      enabled: true
-#      initial-size: 5              # Уменьшил начальный размер
-#      max-size: 20                 # Уменьшил максимальный размер
-#      max-idle-time: 10m           # Сократил время простоя
-#      max-acquire-time: 10s        # УВЕЛИЧИЛ timeout до 10 секунд
-#      max-create-connection-time: 10s  # УВЕЛИЧИЛ timeout создания
-#      validation-query: SELECT 1
-#      # Добавляем дополнительные настройки для стабильности
-#      max-life-time: 30m
-#      leak-detection-threshold: 60000
+#########################################################################
 #
-#  # Включаем SQL логирование для дебага
-#  logging:
-#    level:
-#      io.r2dbc.postgresql: DEBUG
-#      org.springframework.r2dbc: DEBUG
-
-# Logging Configuration для диагностики
-#logging:
-#  level:
-#    root: INFO
-#    com.berrx: DEBUG
-#    io.r2dbc.postgresql: INFO  # Убираем DEBUG чтобы не спамить
-#    org.springframework.r2dbc: INFO
-#    io.r2dbc: INFO
-
-#  pattern:
-#    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
-
-# Management endpoints для диагностики
-#management:
-#  endpoints:
-#    web:
-#      exposure:
-#        include: health,info,metrics,prometheus,env
-#      base-path: /actuator
-#  endpoint:
-#    health:
-#      show-details: always
-#      probes:
-#        enabled: true
 #
-#solana:
-#  rpc:
-#    url: ${HELIUS_RPC_URL:https://api.mainnet-beta.solana.com}
-#    api-key: ${HELIUS_API_KEY:}
-#    timeout: 30
-#    max-retries: 3
-#  network: ${SOLANA_NETWORK:mainnet}
 #
-#arbitrage:
-#  scanner:
-#    enabled: ${SCANNER_ENABLED:true}
-#    interval-ms: ${SCAN_INTERVAL:300000}  # Увеличил интервал до 5 минут для тестов
-#    batch-size: 10                       # Уменьшил batch size
-#    virtual-threads-enabled: true
-
-#  thresholds:
-#    min-triangle-profit: ${MIN_TRIANGLE_PROFIT:0.01}
-#    min-two-way-profit: ${MIN_TWO_WAY_PROFIT:0.005}
-#    min-tvl: ${MIN_TVL:40000}
-#    max-slippage: 0.005
 #
-#  execution:
-#    dry-run: ${DRY_RUN:true}
-#    max-concurrent: 3              # Уменьшил количество одновременных операций
-#    timeout-seconds: 10
-
-# Остальные настройки без изменений...
+#
+## R2DBC PostgreSQL Configuration - ИСПРАВЛЕНО
+##spring:
+##  application:
+##    name: solana-offchain-arbitrage
+#
+##  r2dbc:
+##    url: r2dbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:arbitrage}
+##    username: ${DB_USERNAME:postgres}
+##    password: ${DB_PASSWORD:postgres}
+##    pool:
+##      enabled: true
+##      initial-size: 5              # Уменьшил начальный размер
+##      max-size: 20                 # Уменьшил максимальный размер
+##      max-idle-time: 10m           # Сократил время простоя
+##      max-acquire-time: 10s        # УВЕЛИЧИЛ timeout до 10 секунд
+##      max-create-connection-time: 10s  # УВЕЛИЧИЛ timeout создания
+##      validation-query: SELECT 1
+##      # Добавляем дополнительные настройки для стабильности
+##      max-life-time: 30m
+##      leak-detection-threshold: 60000
+##
+##  # Включаем SQL логирование для дебага
+##  logging:
+##    level:
+##      io.r2dbc.postgresql: DEBUG
+##      org.springframework.r2dbc: DEBUG
+#
+## Logging Configuration для диагностики
+##logging:
+##  level:
+##    root: INFO
+##    com.berrx: DEBUG
+##    io.r2dbc.postgresql: INFO  # Убираем DEBUG чтобы не спамить
+##    org.springframework.r2dbc: INFO
+##    io.r2dbc: INFO
+#
+##  pattern:
+##    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+#
+## Management endpoints для диагностики
+##management:
+##  endpoints:
+##    web:
+##      exposure:
+##        include: health,info,metrics,prometheus,env
+##      base-path: /actuator
+##  endpoint:
+##    health:
+##      show-details: always
+##      probes:
+##        enabled: true
+##
+##solana:
+##  rpc:
+##    url: ${HELIUS_RPC_URL:https://api.mainnet-beta.solana.com}
+##    api-key: ${HELIUS_API_KEY:}
+##    timeout: 30
+##    max-retries: 3
+##  network: ${SOLANA_NETWORK:mainnet}
+##
+##arbitrage:
+##  scanner:
+##    enabled: ${SCANNER_ENABLED:true}
+##    interval-ms: ${SCAN_INTERVAL:300000}  # Увеличил интервал до 5 минут для тестов
+##    batch-size: 10                       # Уменьшил batch size
+##    virtual-threads-enabled: true
+#
+##  thresholds:
+##    min-triangle-profit: ${MIN_TRIANGLE_PROFIT:0.01}
+##    min-two-way-profit: ${MIN_TWO_WAY_PROFIT:0.005}
+##    min-tvl: ${MIN_TVL:40000}
+##    max-slippage: 0.005
+##
+##  execution:
+##    dry-run: ${DRY_RUN:true}
+##    max-concurrent: 3              # Уменьшил количество одновременных операций
+##    timeout-seconds: 10
+#
+## Остальные настройки без изменений...
