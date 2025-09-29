@@ -32,6 +32,14 @@
         <logstash.version>7.4</logstash.version>
     </properties>
     <dependencies>
+
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+            <version>9.22.3</version>
+        </dependency>
+
+
         <!-- Spring Boot Web (НЕ WebFlux) -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

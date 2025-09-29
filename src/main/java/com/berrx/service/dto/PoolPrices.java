@@ -10,8 +10,10 @@ import java.math.MathContext;
 import java.time.LocalDateTime;
 
 /**
- * DTO для хранения актуальных данных цен пула из Solana RPC.
- * Содержит цены, балансы токенов и курс обмена.
+ * DTO for storing current pool price data from Solana RPC.
+ * Contains prices, token balances, and exchange rates.
+ *
+ * UPDATED: Added missing fields required by other services
  */
 @Data
 @Builder
@@ -20,59 +22,69 @@ import java.time.LocalDateTime;
 public class PoolPrices {
 
     /**
-     * Цена первого токена (tokenA) в USD или SOL
+     * Pool address (ADDED - required by SolanaPriceService)
+     */
+    private String poolAddress;
+
+    /**
+     * Whether this data was verified via RPC (ADDED - required by ArbitrageDetectorService)
+     */
+    private boolean verified;
+
+    /**
+     * Price of first token (tokenA) in USD or SOL
      */
     private BigDecimal priceA;
 
     /**
-     * Цена второго токена (tokenB) в USD или SOL
+     * Price of second token (tokenB) in USD or SOL
      */
     private BigDecimal priceB;
 
     /**
-     * Текущий баланс первого токена в пуле
+     * Current balance of first token in pool
      */
     private BigDecimal balanceA;
 
     /**
-     * Текущий баланс второго токена в пуле
+     * Current balance of second token in pool
      */
     private BigDecimal balanceB;
 
     /**
-     * Курс обмена: сколько tokenB за 1 tokenA
+     * Exchange rate: how much tokenB for 1 tokenA
      */
     private BigDecimal exchangeRate;
 
     /**
-     * Обратный курс: сколько tokenA за 1 tokenB
+     * Reverse exchange rate: how much tokenA for 1 tokenB
      */
     private BigDecimal reverseExchangeRate;
 
     /**
-     * Время получения данных
+     * Time when data was fetched
      */
     private LocalDateTime timestamp;
 
     /**
-     * Источник данных (RPC endpoint)
+     * Data source (RPC endpoint)
      */
     private String source;
 
     /**
-     * Номер слота в блокчейне Solana
+     * Solana blockchain slot number
      */
     private Long slot;
 
     /**
-     * Качество данных (0-100, где 100 = свежие данные)
+     * Data quality score (0-100, where 100 = fresh data)
      */
     private Integer qualityScore;
 
-    // =================== ВЫЧИСЛЯЕМЫЕ МЕТОДЫ ===================
+    // =================== CALCULATED METHODS ===================
 
     /**
-     * Рассчитать курс обмена на основе балансов
+     * Calculate exchange rate based on balances
      */
     public BigDecimal calculateExchangeRate() {
         if (balanceA == null || balanceB == null ||
@@ -81,7 +93,7 @@ public class PoolPrices {
         }
 
         try {
-            // exchangeRate = balanceB / balanceA (сколько B за 1 A)
+            // exchangeRate = balanceB / balanceA (how much B for 1 A)
             return balanceB.divide(balanceA, MathContext.DECIMAL128);
         } catch (ArithmeticException e) {
             return null;
@@ -89,7 +101,7 @@ public class PoolPrices {
     }
 
     /**
-     * Рассчитать обратный курс обмена
+     * Calculate reverse exchange rate
      */
     public BigDecimal calculateReverseExchangeRate() {
         if (balanceA == null || balanceB == null ||
@@ -98,7 +110,7 @@ public class PoolPrices {
         }
 
         try {
-            // reverseExchangeRate = balanceA / balanceB (сколько A за 1 B)
+            // reverseExchangeRate = balanceA / balanceB (how much A for 1 B)
             return balanceA.divide(balanceB, MathContext.DECIMAL128);
         } catch (ArithmeticException e) {
             return null;
@@ -106,7 +118,7 @@ public class PoolPrices {
     }
 
     /**
-     * Автоматически рассчитать курсы на основе балансов
+     * Automatically calculate rates based on balances
      */
     public void calculateRates() {
         this.exchangeRate = calculateExchangeRate();
@@ -114,7 +126,7 @@ public class PoolPrices {
     }
 
     /**
-     * Проверить валидность данных
+     * Check data validity
      */
     public boolean isValid() {
         return priceA != null && priceB != null &&
@@ -126,7 +138,7 @@ public class PoolPrices {
     }
 
     /**
-     * Возраст данных в секундах
+     * Data age in seconds
      */
     public long getAgeInSeconds() {
         if (timestamp == null) {
@@ -137,37 +149,37 @@ public class PoolPrices {
     }
 
     /**
-     * Проверить свежесть данных (не старше указанных секунд)
+     * Check if data is fresh (not older than specified seconds)
      */
     public boolean isFresh(int maxAgeSeconds) {
         return getAgeInSeconds() <= maxAgeSeconds;
     }
 
     /**
-     * Рассчитать качество данных на основе возраста
+     * Calculate data quality score based on age
      */
     public void calculateQualityScore() {
         long ageSeconds = getAgeInSeconds();
 
         if (ageSeconds <= 30) {
-            qualityScore = 100; // Отличное качество
+            qualityScore = 100; // Excellent quality
         } else if (ageSeconds <= 60) {
-            qualityScore = 90;  // Очень хорошее
+            qualityScore = 90;  // Very good
         } else if (ageSeconds <= 300) {
-            qualityScore = 70;  // Хорошее (5 минут)
+            qualityScore = 70;  // Good (5 minutes)
         } else if (ageSeconds <= 600) {
-            qualityScore = 50;  // Средне (10 минут)
+            qualityScore = 50;  // Average (10 minutes)
         } else if (ageSeconds <= 1800) {
-            qualityScore = 30;  // Плохое (30 минут)
+            qualityScore = 30;  // Poor (30 minutes)
         } else {
-            qualityScore = 0;   // Очень плохое
+            qualityScore = 0;   // Very poor
         }
     }
 
-    // =================== УТИЛИТЫ ===================
+    // =================== UTILITIES ===================
 
     /**
-     * Получить TVL пула в USD (если цены в USD)
+     * Get pool TVL in USD (if prices are in USD)
      */
     public BigDecimal getTvlUsd() {
         if (priceA == null || priceB == null || balanceA == null || balanceB == null) {
@@ -184,7 +196,7 @@ public class PoolPrices {
     }
 
     /**
-     * Симулировать своп A -> B
+     * Simulate swap A -> B
      */
     public BigDecimal simulateSwapAtoB(BigDecimal amountA) {
         if (exchangeRate == null || amountA == null) {
@@ -199,7 +211,7 @@ public class PoolPrices {
     }
 
     /**
-     * Симулировать своп B -> A
+     * Simulate swap B -> A
      */
     public BigDecimal simulateSwapBtoA(BigDecimal amountB) {
         if (reverseExchangeRate == null || amountB == null) {
@@ -214,7 +226,7 @@ public class PoolPrices {
     }
 
     /**
-     * Форматированное отображение цен
+     * Formatted price display
      */
     public String getFormattedPrices() {
         if (priceA == null || priceB == null) {
@@ -225,7 +237,7 @@ public class PoolPrices {
     }
 
     /**
-     * Форматированное отображение курса
+     * Formatted exchange rate display
      */
     public String getFormattedExchangeRate() {
         if (exchangeRate == null) {
@@ -235,10 +247,10 @@ public class PoolPrices {
         return String.format("1A = %.6fB", exchangeRate.doubleValue());
     }
 
-    // =================== BUILDER ДОПОЛНЕНИЯ ===================
+    // =================== BUILDER ENHANCEMENTS ===================
 
     /**
-     * Builder с дополнительными утилитами
+     * Builder with additional utilities
      */
     public static class PoolPricesBuilder {
 
@@ -248,7 +260,7 @@ public class PoolPrices {
         }
 
         public PoolPricesBuilder withCalculatedRates() {
-            // Рассчитаем курсы после build()
+            // Calculate rates after build()
             return this;
         }
 
@@ -268,6 +280,16 @@ public class PoolPrices {
             return this;
         }
 
+        public PoolPricesBuilder asVerified() {
+            this.verified = true;
+            return this;
+        }
+
+        public PoolPricesBuilder forPool(String poolAddress) {
+            this.poolAddress = poolAddress;
+            return this;
+        }
+
         public PoolPrices buildWithCalculations() {
             PoolPrices prices = this.build();
             prices.calculateRates();
@@ -276,20 +298,33 @@ public class PoolPrices {
         }
     }
 
-    // =================== СТАТИЧЕСКИЕ МЕТОДЫ ===================
+    // =================== STATIC METHODS ===================
 
     /**
-     * Создать пустой объект с текущим временем
+     * Create empty object with current time
      */
     public static PoolPrices empty() {
         return PoolPrices.builder()
                 .timestamp(LocalDateTime.now())
                 .qualityScore(0)
+                .verified(false)
                 .build();
     }
 
     /**
-     * Создать из балансов пула
+     * Create empty object for specific pool
+     */
+    public static PoolPrices emptyForPool(String poolAddress) {
+        return PoolPrices.builder()
+                .poolAddress(poolAddress)
+                .timestamp(LocalDateTime.now())
+                .qualityScore(0)
+                .verified(false)
+                .build();
+    }
+
+    /**
+     * Create from pool balances
      */
     public static PoolPrices fromBalances(BigDecimal balanceA, BigDecimal balanceB, String source) {
         return PoolPrices.builder()
@@ -301,7 +336,21 @@ public class PoolPrices {
     }
 
     /**
-     * Проверить возможность арбитража между двумя ценами
+     * Create verified prices for specific pool
+     */
+    public static PoolPrices verifiedForPool(String poolAddress, BigDecimal priceA, BigDecimal priceB, String source) {
+        return PoolPrices.builder()
+                .poolAddress(poolAddress)
+                .priceA(priceA)
+                .priceB(priceB)
+                .source(source)
+                .verified(true)
+                .withCurrentTimestamp()
+                .buildWithCalculations();
+    }
+
+    /**
+     * Check arbitrage opportunity between two prices
      */
     public static boolean hasArbitrageOpportunity(PoolPrices pool1, PoolPrices pool2,
                                                   double minProfitPercent) {
@@ -314,7 +363,7 @@ public class PoolPrices {
             BigDecimal rate1 = pool1.exchangeRate;
             BigDecimal rate2 = pool2.exchangeRate;
 
-            // Рассчитываем разницу в процентах
+            // Calculate difference in percent
             BigDecimal diff = rate1.subtract(rate2).abs();
             BigDecimal maxRate = rate1.max(rate2);
 
@@ -329,6 +378,61 @@ public class PoolPrices {
 
         } catch (Exception e) {
             return false;
+        }
+    }
+
+    /**
+     * Compare two pool prices for arbitrage calculation
+     */
+    public static ArbitrageCalculation calculateArbitrage(PoolPrices pool1, PoolPrices pool2) {
+        if (!pool1.isValid() || !pool2.isValid()) {
+            return ArbitrageCalculation.noOpportunity();
+        }
+
+        try {
+            BigDecimal rate1 = pool1.exchangeRate;
+            BigDecimal rate2 = pool2.exchangeRate;
+
+            if (rate1 == null || rate2 == null) {
+                return ArbitrageCalculation.noOpportunity();
+            }
+
+            // Determine direction of arbitrage
+            boolean buyFromPool1 = rate1.compareTo(rate2) < 0; // Pool1 is cheaper
+            BigDecimal profitRate = buyFromPool1 ?
+                    rate2.subtract(rate1).divide(rate1, MathContext.DECIMAL128) :
+                    rate1.subtract(rate2).divide(rate2, MathContext.DECIMAL128);
+
+            return ArbitrageCalculation.builder()
+                    .hasOpportunity(profitRate.compareTo(BigDecimal.ZERO) > 0)
+                    .profitPercent(profitRate.multiply(BigDecimal.valueOf(100)).doubleValue())
+                    .buyFromPool1(buyFromPool1)
+                    .pool1Rate(rate1)
+                    .pool2Rate(rate2)
+                    .build();
+
+        } catch (Exception e) {
+            return ArbitrageCalculation.noOpportunity();
+        }
+    }
+
+    /**
+     * Helper class for arbitrage calculations
+     */
+    @lombok.Builder
+    @lombok.Data
+    public static class ArbitrageCalculation {
+        private boolean hasOpportunity;
+        private double profitPercent;
+        private boolean buyFromPool1;
+        private BigDecimal pool1Rate;
+        private BigDecimal pool2Rate;
+
+        public static ArbitrageCalculation noOpportunity() {
+            return ArbitrageCalculation.builder()
+                    .hasOpportunity(false)
+                    .profitPercent(0.0)
+                    .build();
         }
     }
 }

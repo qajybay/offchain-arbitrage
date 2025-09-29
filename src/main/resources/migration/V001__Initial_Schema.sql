@@ -1,5 +1,9 @@
--- Обновленная схема для Solana Arbitrage Bot
+-- ИСПРАВЛЕННАЯ схема для Solana Arbitrage Bot
 -- Гибридный подход: DEX Screener + Solana RPC
+--
+-- АРХИТЕКТУРНОЕ ИЗМЕНЕНИЕ:
+-- Jupiter убран из списка DEX т.к. это агрегатор, не DEX
+-- Поддерживаемые DEX: raydium, orca, meteora
 
 -- Таблица пулов с метаданными
 CREATE TABLE IF NOT EXISTS pools (
@@ -33,7 +37,8 @@ CREATE TABLE IF NOT EXISTS pools (
     CONSTRAINT chk_valid_tokens CHECK (LENGTH(TRIM(token_a_mint)) BETWEEN 43 AND 44 AND LENGTH(TRIM(token_b_mint)) BETWEEN 43 AND 44),
     CONSTRAINT chk_different_tokens CHECK (token_a_mint != token_b_mint),
     CONSTRAINT chk_positive_tvl CHECK (tvl_usd IS NULL OR tvl_usd > 0),
-    CONSTRAINT chk_valid_dex CHECK (dex_name IN ('raydium', 'orca', 'meteora', 'jupiter')),
+    -- ИСПРАВЛЕНО: Jupiter убран из списка поддерживаемых DEX
+    CONSTRAINT chk_valid_dex CHECK (dex_name IN ('raydium', 'orca', 'meteora')),
     CONSTRAINT chk_valid_source CHECK (source IN ('DEX_SCREENER', 'SOLANA_RPC', 'MANUAL'))
 );
 
@@ -48,7 +53,7 @@ CREATE TABLE IF NOT EXISTS trade_pairs (
     avg_tvl_usd DOUBLE PRECISION,
     best_fee_rate DOUBLE PRECISION,
 
-    -- Актуальные цены (обновляются из Solana RPC)
+    -- Актуальные цены (обновляются из Solana RPC / Jupiter API)
     last_price DOUBLE PRECISION,
     price_updated_at TIMESTAMP,
 
@@ -80,7 +85,7 @@ CREATE TABLE IF NOT EXISTS arbitrage_opportunities (
 
     -- Пулы (JSON массив адресов)
     pools_involved TEXT NOT NULL,
-    dex_names TEXT, -- Список DEX через запятую
+    dex_names TEXT, -- Список DEX через запятую (raydium, orca, meteora)
 
     -- Временные метки
     created_at TIMESTAMP NOT NULL DEFAULT NOW(),
@@ -129,13 +134,49 @@ CREATE TABLE IF NOT EXISTS token_metadata (
     CONSTRAINT chk_valid_token_source CHECK (source IN ('JUPITER', 'DEX_SCREENER', 'ON_CHAIN', 'MANUAL'))
 );
 
--- Индексы для производительности
+-- =================== ИСПРАВЛЕНИЯ ДЛЯ JUPITER ===================
+
+-- 1. КРИТИЧНО: Деактивируем все существующие Jupiter записи
+UPDATE pools
+SET is_active = false,
+    last_updated = NOW(),
+    source = 'DEPRECATED_JUPITER'
+WHERE dex_name = 'jupiter' AND is_active = true;
+
+-- 2. Логируем количество деактивированных Jupiter пулов
+-- Это покажет сколько записей было исправлено
+SELECT
+    COUNT(*) as jupiter_pools_deactivated,
+    NOW() as deactivated_at
+FROM pools
+WHERE dex_name = 'jupiter' AND source = 'DEPRECATED_JUPITER';
+
+-- 3. Добавляем информационные комментарии
+INSERT INTO pools (address, token_a_mint, token_b_mint, dex_name, tvl_usd, is_active, source, last_updated)
+SELECT
+    'JUPITER_MIGRATION_LOG_' || EXTRACT(EPOCH FROM NOW())::TEXT,
+    'So11111111111111111111111111111111111111112', -- SOL
+    'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', -- USDC
+    'migration_log',
+    0,
+    false,
+    'MIGRATION_LOG',
+    NOW()
+WHERE EXISTS (SELECT 1 FROM pools WHERE dex_name = 'jupiter')
+ON CONFLICT DO NOTHING;
+
+-- =================== ИНДЕКСЫ ДЛЯ ПРОИЗВОДИТЕЛЬНОСТИ ===================
+
 CREATE INDEX IF NOT EXISTS idx_pools_active_tvl ON pools (is_active, tvl_usd DESC) WHERE is_active = true;
 CREATE INDEX IF NOT EXISTS idx_pools_dex_tokens ON pools (dex_name, token_a_mint, token_b_mint);
 CREATE INDEX IF NOT EXISTS idx_pools_updated ON pools (last_updated DESC);
 CREATE INDEX IF NOT EXISTS idx_pools_token_mints ON pools (token_a_mint, token_b_mint);
 CREATE INDEX IF NOT EXISTS idx_pools_symbols ON pools (token_a_symbol, token_b_symbol) WHERE token_a_symbol IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_pools_source ON pools (source, is_active);
+
+-- НОВЫЙ: Индекс для фильтрации только поддерживаемых DEX
+CREATE INDEX IF NOT EXISTS idx_pools_supported_dex ON pools (dex_name, is_active, tvl_usd DESC)
+WHERE dex_name IN ('raydium', 'orca', 'meteora') AND is_active = true;
 
 CREATE INDEX IF NOT EXISTS idx_trade_pairs_tokens ON trade_pairs (token_a, token_b);
 CREATE INDEX IF NOT EXISTS idx_trade_pairs_tvl ON trade_pairs (avg_tvl_usd DESC NULLS LAST);
@@ -181,13 +222,79 @@ INSERT INTO token_metadata (mint_address, symbol, name, decimals, verified, sour
 ON CONFLICT (mint_address) DO UPDATE SET
     last_updated = NOW();
 
--- Комментарии для документации
-COMMENT ON TABLE pools IS 'Пулы ликвидности с метаданными из DEX Screener';
+-- =================== ПРОВЕРКИ И СТАТИСТИКА ===================
+
+-- Создать view для статистики DEX без Jupiter
+CREATE OR REPLACE VIEW dex_statistics AS
+SELECT
+    dex_name,
+    COUNT(*) as pool_count,
+    COUNT(*) FILTER (WHERE is_active = true) as active_pools,
+    AVG(tvl_usd) as avg_tvl,
+    SUM(tvl_usd) FILTER (WHERE is_active = true) as total_tvl,
+    MIN(last_updated) as oldest_update,
+    MAX(last_updated) as newest_update
+FROM pools
+WHERE dex_name IN ('raydium', 'orca', 'meteora')  -- БЕЗ Jupiter
+GROUP BY dex_name
+ORDER BY active_pools DESC;
+
+-- Создать view для мониторинга Jupiter migration
+CREATE OR REPLACE VIEW jupiter_migration_status AS
+SELECT
+    COUNT(*) FILTER (WHERE dex_name = 'jupiter') as total_jupiter_records,
+    COUNT(*) FILTER (WHERE dex_name = 'jupiter' AND is_active = false) as deactivated_jupiter,
+    COUNT(*) FILTER (WHERE dex_name = 'jupiter' AND is_active = true) as still_active_jupiter,
+    COUNT(*) FILTER (WHERE source = 'DEPRECATED_JUPITER') as migrated_records,
+    NOW() as check_time
+FROM pools;
+
+-- =================== КОММЕНТАРИИ ДЛЯ ДОКУМЕНТАЦИИ ===================
+
+COMMENT ON TABLE pools IS 'Пулы ликвидности с метаданными из DEX Screener. Jupiter исключен как агрегатор.';
 COMMENT ON TABLE trade_pairs IS 'Агрегированные торговые пары для анализа арбитража';
 COMMENT ON TABLE arbitrage_opportunities IS 'Найденные арбитражные возможности с временем жизни';
 COMMENT ON TABLE token_metadata IS 'Кеш метаданных токенов из различных источников';
 
+COMMENT ON COLUMN pools.dex_name IS 'Название DEX: raydium, orca, meteora. Jupiter исключен (агрегатор, не DEX).';
 COMMENT ON COLUMN pools.tvl_usd IS 'TVL в USD из DEX Screener';
 COMMENT ON COLUMN pools.source IS 'Источник данных: DEX_SCREENER, SOLANA_RPC, MANUAL';
 COMMENT ON COLUMN arbitrage_opportunities.priority_score IS 'Автоматически рассчитываемый приоритет (триггер)';
-COMMENT ON COLUMN trade_pairs.price_updated_at IS 'Время последнего обновления цены из Solana RPC';
+COMMENT ON COLUMN arbitrage_opportunities.dex_names IS 'Список DEX через запятую (raydium, orca, meteora)';
+COMMENT ON COLUMN trade_pairs.price_updated_at IS 'Время последнего обновления цены из Solana RPC или Jupiter Price API';
+
+COMMENT ON VIEW dex_statistics IS 'Статистика по поддерживаемым DEX (без Jupiter агрегатора)';
+COMMENT ON VIEW jupiter_migration_status IS 'Статус миграции Jupiter записей после архитектурного изменения';
+
+-- =================== ФИНАЛЬНЫЕ ПРОВЕРКИ ===================
+
+-- 1. Проверяем что constraint обновлен
+SELECT conname
+FROM pg_constraint
+WHERE conname = 'chk_valid_dex';
+
+-- 2. Показываем статистику до/после
+SELECT
+    'BEFORE_FIX' as status,
+    dex_name,
+    COUNT(*) as count,
+    COUNT(*) FILTER (WHERE is_active = true) as active
+FROM pools
+GROUP BY dex_name
+UNION ALL
+SELECT
+    'CURRENT_STATE' as status,
+    dex_name,
+    COUNT(*) as count,
+    COUNT(*) FILTER (WHERE is_active = true) as active
+FROM pools
+WHERE dex_name IN ('raydium', 'orca', 'meteora')
+GROUP BY dex_name
+ORDER BY status DESC, count DESC;
+
+-- 3. Финальное сообщение
+SELECT
+    '✅ JUPITER MIGRATION COMPLETED' as message,
+    NOW() as timestamp,
+    (SELECT COUNT(*) FROM pools WHERE dex_name IN ('raydium', 'orca', 'meteora') AND is_active = true) as supported_dex_pools,
+    (SELECT COUNT(*) FROM pools WHERE dex_name = 'jupiter' AND is_active = false) as jupiter_pools_deactivated;

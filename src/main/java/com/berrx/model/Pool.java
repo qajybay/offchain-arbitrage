@@ -9,23 +9,29 @@ import lombok.NoArgsConstructor;
 import java.time.LocalDateTime;
 
 /**
- * Pool entity представляет пул ликвидности из различных DEX Solana.
- * Содержит метаданные из DEX Screener и актуальные цены из Solana RPC.
+ * Pool entity represents liquidity pool from various Solana DEX.
+ * Contains metadata from DEX Screener and current prices from Solana RPC.
  *
- * Гибридный подход:
- * - Метаданные (символы, названия, базовый TVL) из DEX Screener API
- * - Актуальные цены и балансы из Solana RPC (@Transient поля)
- * - Кеширование в PostgreSQL для быстрого доступа
+ * UPDATED: Changed @Transient price fields to persistent fields to support JPA queries
+ *
+ * Hybrid approach:
+ * - Metadata (symbols, names, basic TVL) from DEX Screener API
+ * - Current prices and balances from Solana RPC (now stored in DB for queries)
+ * - PostgreSQL caching for fast access
+ *
+ * ARCHITECTURAL CHANGE:
+ * Jupiter removed from all methods since it's an aggregator, not a DEX.
+ * Supported DEX: raydium, orca, meteora
  */
 @Entity
-@Table(name = "pools",
-        indexes = {
-                @Index(name = "idx_pools_active_tvl", columnList = "isActive,tvlUsd"),
-                @Index(name = "idx_pools_dex_tokens", columnList = "dexName,tokenAMint,tokenBMint"),
-                @Index(name = "idx_pools_token_mints", columnList = "tokenAMint,tokenBMint"),
-                @Index(name = "idx_pools_updated", columnList = "lastUpdated"),
-                @Index(name = "idx_pools_symbols", columnList = "tokenASymbol,tokenBSymbol")
-        })
+@Table(name = "pools", indexes = {
+        @Index(name = "idx_pool_address", columnList = "address"),
+        @Index(name = "idx_pool_active_tvl", columnList = "is_active, tvl_usd"),
+        @Index(name = "idx_pool_dex", columnList = "dex_name"),
+        @Index(name = "idx_pool_tokens", columnList = "token_a_mint, token_b_mint"),
+        @Index(name = "idx_pool_last_updated", columnList = "last_updated"),
+        @Index(name = "idx_pool_price_updated", columnList = "price_updated_at")
+})
 @Data
 @Builder
 @NoArgsConstructor
@@ -36,140 +42,138 @@ public class Pool {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
+    // =================== POOL IDENTIFICATION ===================
+
     /**
-     * Уникальный адрес пула в сети Solana (43-44 символа, Base58)
+     * Unique pool address on Solana blockchain
      */
-    @Column(name = "address", unique = true, length = 44, nullable = false)
+    @Column(name = "address", unique = true, nullable = false, length = 44)
     private String address;
 
-    // =================== ТОКЕН A ===================
+    // =================== TOKEN A METADATA ===================
 
     /**
-     * Mint адрес первого токена в пуле
+     * First token mint address
      */
-    @Column(name = "token_a_mint", length = 44, nullable = false)
+    @Column(name = "token_a_mint", nullable = false, length = 44)
     private String tokenAMint;
 
     /**
-     * Символ первого токена (например, "SOL", "USDC")
-     * Получается из DEX Screener API
+     * First token symbol (from DEX Screener)
      */
     @Column(name = "token_a_symbol", length = 20)
     private String tokenASymbol;
 
     /**
-     * Полное название первого токена
-     * Получается из DEX Screener API
+     * First token name (from DEX Screener)
      */
     @Column(name = "token_a_name", length = 100)
     private String tokenAName;
 
-    // =================== ТОКЕН B ===================
+    // =================== TOKEN B METADATA ===================
 
     /**
-     * Mint адрес второго токена в пуле
+     * Second token mint address
      */
-    @Column(name = "token_b_mint", length = 44, nullable = false)
+    @Column(name = "token_b_mint", nullable = false, length = 44)
     private String tokenBMint;
 
     /**
-     * Символ второго токена
-     * Получается из DEX Screener API
+     * Second token symbol (from DEX Screener)
      */
     @Column(name = "token_b_symbol", length = 20)
     private String tokenBSymbol;
 
     /**
-     * Полное название второго токена
-     * Получается из DEX Screener API
+     * Second token name (from DEX Screener)
      */
     @Column(name = "token_b_name", length = 100)
     private String tokenBName;
 
-    // =================== ЛИКВИДНОСТЬ И DEX ===================
+    // =================== POOL LIQUIDITY ===================
 
     /**
-     * Total Value Locked в USD
-     * Получается из DEX Screener API, периодически обновляется
+     * Total Value Locked in USD (from DEX Screener)
      */
     @Column(name = "tvl_usd")
     private Double tvlUsd;
 
     /**
-     * Название DEX (raydium, orca, meteora, jupiter)
+     * DEX name (raydium, orca, meteora)
+     * Jupiter excluded - it's an aggregator
      */
     @Column(name = "dex_name", length = 20, nullable = false)
     private String dexName;
 
     /**
-     * Комиссия пула (например, 0.0025 = 0.25%)
+     * Pool fee rate (e.g., 0.0025 = 0.25%)
      */
     @Column(name = "fee_rate")
     private Double feeRate;
 
-    // =================== ВРЕМЕННЫЕ МЕТКИ ===================
+    // =================== TIMESTAMPS ===================
 
     /**
-     * Время последнего обновления данных пула
+     * Last update time for pool metadata
      */
     @Column(name = "last_updated", nullable = false)
     private LocalDateTime lastUpdated;
 
     /**
-     * Активен ли пул (используется для мягкого удаления)
+     * Active status (for soft deletion)
      */
     @Column(name = "is_active", nullable = false)
     private Boolean isActive;
 
     /**
-     * Источник данных (DEX_SCREENER, SOLANA_RPC, MANUAL)
+     * Data source (DEX_SCREENER, SOLANA_RPC, MANUAL)
      */
     @Column(name = "source", length = 20)
     private String source;
 
-    // =================== АКТУАЛЬНЫЕ ДАННЫЕ (TRANSIENT) ===================
-    // Эти поля НЕ сохраняются в БД, обновляются из Solana RPC в реальном времени
+    // =================== CURRENT PRICES (FIXED: NOW PERSISTENT) ===================
+    // These fields are NOW stored in DB to support JPA queries for arbitrage detection
 
     /**
-     * Текущая цена первого токена (из Solana RPC)
+     * FIXED: Current price of first token (from Solana RPC) - NOW PERSISTENT
      */
-    @Transient
+    @Column(name = "current_price_a")
     private Double currentPriceA;
 
     /**
-     * Текущая цена второго токена (из Solana RPC)
+     * FIXED: Current price of second token (from Solana RPC) - NOW PERSISTENT
      */
-    @Transient
+    @Column(name = "current_price_b")
     private Double currentPriceB;
 
     /**
-     * Время последнего обновления цен
+     * FIXED: Last price update time - NOW PERSISTENT
      */
-    @Transient
+    @Column(name = "price_updated_at")
     private LocalDateTime priceUpdatedAt;
 
     /**
-     * Текущий баланс первого токена в пуле
+     * Current balance of first token in pool (updated from RPC)
      */
-    @Transient
+    @Column(name = "token_a_balance")
     private Double tokenABalance;
 
     /**
-     * Текущий баланс второго токена в пуле
+     * Current balance of second token in pool (updated from RPC)
      */
-    @Transient
+    @Column(name = "token_b_balance")
     private Double tokenBBalance;
 
     /**
-     * Текущий курс (tokenB за tokenA)
+     * Current exchange rate (tokenB per tokenA)
      */
-    @Transient
+    @Column(name = "exchange_rate")
     private Double exchangeRate;
 
-    // =================== ОСНОВНЫЕ МЕТОДЫ ===================
+    // =================== CORE METHODS ===================
 
     /**
-     * Отображаемое имя пула для логов и UI
+     * Display name for logs and UI
      */
     public String getDisplayName() {
         String symbolA = tokenASymbol != null ? tokenASymbol : "???";
@@ -180,7 +184,7 @@ public class Pool {
     }
 
     /**
-     * Короткое имя пары токенов
+     * Short token pair name
      */
     public String getSymbolPair() {
         String symbolA = tokenASymbol != null ? tokenASymbol : "???";
@@ -189,75 +193,76 @@ public class Pool {
     }
 
     /**
-     * Форматированный TVL для отображения
+     * Formatted TVL for display
      */
     public String getFormattedTvl() {
-        if (tvlUsd == null || tvlUsd <= 0) return "$0";
-
-        if (tvlUsd >= 1_000_000_000) {
-            return String.format("$%.1fB", tvlUsd / 1_000_000_000);
-        } else if (tvlUsd >= 1_000_000) {
+        if (tvlUsd == null) return "N/A";
+        if (tvlUsd >= 1_000_000) {
             return String.format("$%.1fM", tvlUsd / 1_000_000);
         } else if (tvlUsd >= 1_000) {
-            return String.format("$%.1fK", tvlUsd / 1_000);
+            return String.format("$%.0fK", tvlUsd / 1_000);
+        } else {
+            return String.format("$%.0f", tvlUsd);
         }
-        return String.format("$%.0f", tvlUsd);
     }
 
-    // =================== ПРОВЕРКИ ВАЛИДНОСТИ ===================
+    // =================== VALIDATION METHODS ===================
 
     /**
-     * Проверка наличия всех необходимых метаданных
+     * Check if pool has valid metadata
      */
     public boolean hasValidMetadata() {
-        return tokenAMint != null && tokenBMint != null &&
-                tokenASymbol != null && tokenBSymbol != null &&
-                tvlUsd != null && tvlUsd > 0 &&
-                dexName != null && !dexName.isEmpty();
+        return address != null && !address.isBlank() &&
+                tokenAMint != null && !tokenAMint.isBlank() &&
+                tokenBMint != null && !tokenBMint.isBlank() &&
+                dexName != null && !dexName.isBlank() &&
+                tvlUsd != null && tvlUsd > 0;
     }
 
     /**
-     * Проверка наличия актуальных цен (обновлены недавно)
+     * FIXED: Check if pool has current prices (now works with persistent fields)
      */
     public boolean hasCurrentPrices() {
         return currentPriceA != null && currentPriceB != null &&
+                currentPriceA > 0 && currentPriceB > 0 &&
                 priceUpdatedAt != null &&
-                priceUpdatedAt.isAfter(LocalDateTime.now().minusMinutes(5));
+                priceUpdatedAt.isAfter(LocalDateTime.now().minusMinutes(30)); // 30 minutes max age
     }
 
     /**
-     * Проверка пригодности пула для арбитража
+     * Check if pool is suitable for arbitrage
      */
     public boolean isSuitableForArbitrage(double minTvlUsd) {
         return isActive != null && isActive &&
                 tvlUsd != null && tvlUsd >= minTvlUsd &&
                 hasValidMetadata() &&
+                hasCurrentPrices() &&
                 !isLikelyScam();
     }
 
     /**
-     * Простая проверка на скам токены
+     * Simple check for scam tokens
      */
     public boolean isLikelyScam() {
         if (tokenASymbol == null || tokenBSymbol == null) return false;
 
-        // Проверяем подозрительные паттерны
+        // Check suspicious patterns
         return tokenASymbol.length() > 15 ||
                 tokenBSymbol.length() > 15 ||
                 tokenASymbol.toLowerCase().contains("test") ||
                 tokenBSymbol.toLowerCase().contains("test") ||
-                (tvlUsd != null && tvlUsd > 1_000_000_000); // > $1B подозрительно
+                (tvlUsd != null && tvlUsd > 1_000_000_000); // > $1B suspicious
     }
 
-    // =================== РАБОТА С ТОКЕНАМИ ===================
+    // =================== TOKEN METHODS ===================
 
     /**
-     * Уникальный идентификатор торговой пары (сортированный)
+     * Unique token pair ID (sorted for consistency)
      */
     public String getTokenPairId() {
         if (tokenAMint == null || tokenBMint == null) return null;
 
-        // Сортируем адреса для консистентности
+        // Sort addresses for consistency
         if (tokenAMint.compareTo(tokenBMint) < 0) {
             return tokenAMint + "-" + tokenBMint;
         } else {
@@ -266,7 +271,7 @@ public class Pool {
     }
 
     /**
-     * Проверка содержания определенного токена в пуле
+     * Check if pool contains specific token
      */
     public boolean containsToken(String tokenMint) {
         return tokenMint != null &&
@@ -274,37 +279,56 @@ public class Pool {
     }
 
     /**
-     * Получить адрес другого токена в паре
+     * Get the other token in the pair
      */
     public String getOtherToken(String tokenMint) {
         if (tokenMint == null) return null;
-
-        if (tokenMint.equals(tokenAMint)) {
-            return tokenBMint;
-        } else if (tokenMint.equals(tokenBMint)) {
-            return tokenAMint;
-        }
+        if (tokenMint.equals(tokenAMint)) return tokenBMint;
+        if (tokenMint.equals(tokenBMint)) return tokenAMint;
         return null;
     }
 
+    // =================== PRICE AND ARBITRAGE METHODS ===================
+
     /**
-     * Получить символ другого токена в паре
+     * Get age of price data in minutes
      */
-    public String getOtherTokenSymbol(String tokenMint) {
-        if (tokenMint == null) return null;
-
-        if (tokenMint.equals(tokenAMint)) {
-            return tokenBSymbol;
-        } else if (tokenMint.equals(tokenBMint)) {
-            return tokenASymbol;
-        }
-        return null;
+    public long getPriceAgeMinutes() {
+        if (priceUpdatedAt == null) return Long.MAX_VALUE;
+        return java.time.Duration.between(priceUpdatedAt, LocalDateTime.now()).toMinutes();
     }
 
-    // =================== ВРЕМЕННЫЕ МЕТОДЫ ===================
+    /**
+     * Calculate price ratio (A/B)
+     */
+    public Double getPriceRatio() {
+        if (currentPriceA == null || currentPriceB == null || currentPriceB == 0) {
+            return null;
+        }
+        return currentPriceA / currentPriceB;
+    }
 
     /**
-     * Возраст данных в минутах
+     * Calculate reverse price ratio (B/A)
+     */
+    public Double getReversePriceRatio() {
+        if (currentPriceA == null || currentPriceB == null || currentPriceA == 0) {
+            return null;
+        }
+        return currentPriceB / currentPriceA;
+    }
+
+    /**
+     * Check if prices are fresh (updated recently)
+     */
+    public boolean hasFreshPrices(int maxAgeMinutes) {
+        return getPriceAgeMinutes() <= maxAgeMinutes;
+    }
+
+    // =================== UTILITY METHODS ===================
+
+    /**
+     * Data age in minutes
      */
     public long getDataAgeMinutes() {
         if (lastUpdated == null) return Long.MAX_VALUE;
@@ -312,198 +336,46 @@ public class Pool {
     }
 
     /**
-     * Проверка устаревания данных
+     * Quality score based on data freshness
      */
-    public boolean isStale(int maxAgeMinutes) {
-        return getDataAgeMinutes() > maxAgeMinutes;
-    }
-
-    /**
-     * Свежесть данных в процентах (100% = только что обновлено)
-     */
-    public double getFreshnessPercent() {
+    public int getQualityScore() {
         long ageMinutes = getDataAgeMinutes();
-        if (ageMinutes == 0) return 100.0;
-        if (ageMinutes >= 60) return 0.0;
+        long priceAgeMinutes = getPriceAgeMinutes();
 
-        return Math.max(0, 100.0 - (ageMinutes * 100.0 / 60.0));
-    }
+        if (!hasValidMetadata()) return 0;
 
-    // =================== КАТЕГОРИЗАЦИЯ ПУЛОВ ===================
+        int metadataScore = ageMinutes <= 60 ? 50 : (ageMinutes <= 180 ? 30 : 10);
+        int priceScore = hasFreshPrices(5) ? 50 : (hasFreshPrices(15) ? 30 : 0);
 
-    /**
-     * Является ли основной парой (содержит SOL, USDC, USDT)
-     */
-    public boolean isMainPair() {
-        return containsStablecoin() || containsSol();
+        return metadataScore + priceScore;
     }
 
     /**
-     * Содержит ли пул SOL
-     */
-    public boolean containsSol() {
-        String solMint = "So11111111111111111111111111111111111111112";
-        return containsToken(solMint);
-    }
-
-    /**
-     * Содержит ли пул стейблкоин
-     */
-    public boolean containsStablecoin() {
-        String usdcMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-        String usdtMint = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB";
-        return containsToken(usdcMint) || containsToken(usdtMint);
-    }
-
-    /**
-     * Является ли стейблкоин парой (USDC/USDT)
-     */
-    public boolean isStablePair() {
-        String usdcMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-        String usdtMint = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB";
-        return containsToken(usdcMint) && containsToken(usdtMint);
-    }
-
-    // =================== КАЧЕСТВО И РЕЙТИНГ ===================
-
-    /**
-     * Рассчитать качество пула для арбитража (0-100)
-     */
-    public double getQualityScore() {
-        double score = 0.0;
-
-        // TVL влияет на качество (40%)
-        if (tvlUsd != null && tvlUsd > 0) {
-            score += Math.min(40, Math.log10(tvlUsd) * 5);
-        }
-
-        // Основные пары получают бонус (20%)
-        if (isMainPair()) {
-            score += 20;
-        }
-
-        // Свежесть данных (20%)
-        score += getFreshnessPercent() * 0.2;
-
-        // Наличие метаданных (10%)
-        if (hasValidMetadata()) {
-            score += 10;
-        }
-
-        // Стабильность DEX (10%)
-        if (dexName != null) {
-            switch (dexName.toLowerCase()) {
-                case "raydium", "orca" -> score += 10;
-                case "meteora", "jupiter" -> score += 8;
-                default -> score += 5;
-            }
-        }
-
-        return Math.min(100, score);
-    }
-
-    /**
-     * Приоритет пула для арбитража (higher = better)
-     */
-    public int getArbitragePriority() {
-        int priority = 0;
-
-        // TVL приоритет
-        if (tvlUsd != null) {
-            if (tvlUsd >= 10_000_000) priority += 100;      // > $10M
-            else if (tvlUsd >= 1_000_000) priority += 80;   // > $1M
-            else if (tvlUsd >= 100_000) priority += 60;     // > $100K
-            else if (tvlUsd >= 40_000) priority += 40;      // > $40K
-        }
-
-        // Тип пары
-        if (isStablePair()) priority += 50;        // Стейблкоин пары
-        else if (containsSol()) priority += 30;    // SOL пары
-        else if (containsStablecoin()) priority += 20; // Стейблкоин пары
-
-        // DEX приоритет
-        if (dexName != null) {
-            switch (dexName.toLowerCase()) {
-                case "raydium" -> priority += 20;
-                case "orca" -> priority += 18;
-                case "meteora" -> priority += 15;
-                case "jupiter" -> priority += 12;
-            }
-        }
-
-        // Свежесть данных
-        long ageMinutes = getDataAgeMinutes();
-        if (ageMinutes < 5) priority += 10;
-        else if (ageMinutes < 30) priority += 5;
-
-        return priority;
-    }
-
-    // =================== СЛУЖЕБНЫЕ МЕТОДЫ ===================
-
-    /**
-     * Установить комиссию по умолчанию если не задана
-     */
-    public void setDefaultFeeRateIfNull() {
-        if (feeRate == null && dexName != null) {
-            feeRate = getDefaultFeeRate(dexName);
-        }
-    }
-
-    /**
-     * Получить стандартную комиссию для DEX
+     * Default fee rate by DEX
      */
     public static Double getDefaultFeeRate(String dexName) {
-        if (dexName == null) return 0.003; // 0.3% по умолчанию
-
+        if (dexName == null) return null;
         return switch (dexName.toLowerCase()) {
-            case "raydium" -> 0.0025;   // 0.25%
-            case "orca" -> 0.003;       // 0.3%
-            case "meteora" -> 0.003;    // 0.3%
-            case "jupiter" -> 0.0025;   // 0.25%
-            default -> 0.003;           // 0.3%
+            case "raydium" -> 0.0025; // 0.25%
+            case "orca" -> 0.003;     // 0.3%
+            case "meteora" -> 0.002;  // 0.2%
+            default -> 0.003;         // Default 0.3%
         };
     }
 
+    // =================== DISPLAY METHODS ===================
+
     /**
-     * Обновить из другого пула (для merge операций)
+     * Comprehensive string representation for debugging
      */
-    public void updateFrom(Pool other) {
-        if (other == null) return;
-
-        // Обновляем TVL и время
-        if (other.getTvlUsd() != null) {
-            this.tvlUsd = other.getTvlUsd();
-        }
-        this.lastUpdated = LocalDateTime.now();
-        this.isActive = true;
-
-        // Обновляем метаданные если они были пустые
-        if (this.tokenASymbol == null && other.getTokenASymbol() != null) {
-            this.tokenASymbol = other.getTokenASymbol();
-        }
-        if (this.tokenBSymbol == null && other.getTokenBSymbol() != null) {
-            this.tokenBSymbol = other.getTokenBSymbol();
-        }
-        if (this.tokenAName == null && other.getTokenAName() != null) {
-            this.tokenAName = other.getTokenAName();
-        }
-        if (this.tokenBName == null && other.getTokenBName() != null) {
-            this.tokenBName = other.getTokenBName();
-        }
-        if (this.feeRate == null && other.getFeeRate() != null) {
-            this.feeRate = other.getFeeRate();
-        }
-    }
-
-    // =================== ПЕРЕОПРЕДЕЛЕНИЕ МЕТОДОВ ===================
-
     @Override
     public String toString() {
-        return String.format("Pool{%s, %s, %s, active=%s, age=%dm, quality=%.1f}",
+        return String.format("Pool{id=%d, addr=%s, pair=%s, tvl=%s, dex=%s, active=%s, age=%dm, quality=%d}",
+                id,
                 address != null ? address.substring(0, 8) + "..." : "null",
                 getSymbolPair(),
                 getFormattedTvl(),
+                dexName,
                 isActive,
                 getDataAgeMinutes(),
                 getQualityScore());
@@ -521,10 +393,10 @@ public class Pool {
         return address != null ? address.hashCode() : 0;
     }
 
-    // =================== BUILDER ДОПОЛНЕНИЯ ===================
+    // =================== BUILDER ENHANCEMENTS ===================
 
     /**
-     * Builder с дополнительными методами
+     * Builder with additional utilities
      */
     public static class PoolBuilder {
 
@@ -543,6 +415,18 @@ public class Pool {
 
         public PoolBuilder fromDexScreener() {
             this.source = "DEX_SCREENER";
+            return this;
+        }
+
+        public PoolBuilder withCurrentPrices(Double priceA, Double priceB) {
+            this.currentPriceA = priceA;
+            this.currentPriceB = priceB;
+            this.priceUpdatedAt = LocalDateTime.now();
+            return this;
+        }
+
+        public PoolBuilder withFreshTimestamp() {
+            this.lastUpdated = LocalDateTime.now();
             return this;
         }
     }
